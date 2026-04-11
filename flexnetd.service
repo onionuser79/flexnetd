@@ -1,0 +1,22 @@
+[Unit]
+Description=FlexNet routing daemon for URONode
+Documentation=man:flexnetd(8)
+After=network.target ax25.service
+Wants=ax25.service
+
+[Service]
+Type=forking
+ExecStart=/usr/local/sbin/flexnetd -d -c /usr/local/etc/ax25/flexnetd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/var/run/flexnetd.pid
+Restart=on-failure
+RestartSec=30
+User=root
+
+# Logging — use journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flexnetd
+
+[Install]
+WantedBy=multi-user.target
