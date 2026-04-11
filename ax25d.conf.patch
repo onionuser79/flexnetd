@@ -1,0 +1,11 @@
+# ax25d.conf changes for flexnetd with IW2OHX-3
+#
+# flexnetd binds IW2OHX-3 (the xnet port callsign) directly.
+# This matches the ax1 interface address — no special kernel tricks needed.
+#
+# ENSURE [IW2OHX-3 VIA xnet] is NOT in ax25d.conf — flexnetd owns it.
+#
+# ax25d continues to own IW2OHX-7 on bpq and pcf for uronode.
+#
+# On the Xnet side, configure the FlexNet link to IW2OHX-3:
+#   ro flexnet add xnet IW2OHX-3
