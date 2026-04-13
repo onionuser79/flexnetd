@@ -65,6 +65,9 @@ int dtable_merge(const DestEntry *incoming)
     if (incoming->node_alias[0])
         snprintf(existing->node_alias, MAX_ALIAS_LEN,
                  "%s", incoming->node_alias);
+    if (incoming->via_callsign[0])
+        snprintf(existing->via_callsign, MAX_CALLSIGN_LEN,
+                 "%s", incoming->via_callsign);
 
     int improved = (incoming->rtt < old_rtt);
     LOG_DBG("dtable_merge: %s  %-9s %2d-%2d  %s -> %s",
