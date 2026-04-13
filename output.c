@@ -80,7 +80,6 @@ int output_write_destinations(void)
     }
 
     fprintf(f, "Dest     SSID    RTT Via\n");
-    fprintf(f, "-------- ----- ----- ---------\n");
 
     int written = 0, skipped = 0;
 
