@@ -1,8 +1,9 @@
-# FlexNet / (X)Net Protocol — Findings
+# FlexNet / (X)Net Protocol — Reverse Engineering Findings
 # Based on live captures from IW2OHX-14 <-> IR3UHU-2 and IW2OHX-14 <-> IW2OHX-13
-# Initial capture: 2026-04-10  |  Phase 1/2 captures: 2026-04-13  |  Phase 3: 2026-04-13
+# Initial: 2026-04-10 | Phase 1/2: 2026-04-13 | Phase 3: 2026-04-13 | Phase 4: 2026-04-13
 # Author: IW2OHX + Claude Sonnet 4.6
 # Verified against: DCC1995 paper (DK7WJ/N2IRZ), xnet138.pdf, RMNC_FlexNet.html
+# Status: ALL INVESTIGATION ITEMS RESOLVED
 # =======================================================================
 
 ## CRITICAL: PID assignments (confirmed from xnet138.pdf section 4.3.12)
@@ -11,319 +12,265 @@
   PID=CF (0xCF) = NET/ROM protocol
   PID=F0 (0xF0) = Plain AX.25 / UI frames
 
-  NOTE: (X)Net speaks BOTH FlexNet (CE) and NET/ROM (CF) simultaneously.
-  What appears in the monitor as "pid CF" frames are NET/ROM-compatible
-  routing frames. The "pid CE" frames are native FlexNet.
-
 ---
 
 ## PID=CF (0xCF) — NET/ROM-compatible Routing Layer
 
 ### L3RTT — Round-trip time probe
 
-  Payload (ASCII, single long line, may wrap at ~80 chars in monitor output):
+  Payload: L3RTT: <counter>  <val1>  <val2>  <node_serial>  <NODE_ALIAS>  LEVEL3_V2.1  (X)NET<ver>  $M<rtt>  [$N]
 
-    L3RTT: <counter>  <val1>  <val2>  <node_serial>  <NODE_ALIAS>  LEVEL3_V2.1  (X)NET<ver>  $M<rtt>  [$N]
+  Fields (confirmed Phase 1 + Phase 3):
 
-  All fields space-separated on one logical line. Join all body lines before parsing.
+    counter     : monotonic ms tick counter (10-digit). Used as RTT echo token.
 
-  Fields (confirmed from Phase 1 clean ASCII capture + Phase 3 disruption test):
+    val1        : CONFIRMED: 0 when no reply ($M=60000), non-zero when active.
+                  Range 0,3,4,5.
 
-    counter     : monotonic millisecond tick counter (10-digit decimal)
-                  Increments ~500 per probe (~500ms between probes)
-                  Used as the RTT echo token: B echoes A's counter back,
-                  A measures wall-clock elapsed time -> $M value
+    val2        : CONFIRMED: 0 when no reply ($M=60000), non-zero when active.
+                  KEY RULE: val1=0 AND val2=0 = reliable "link down" indicator.
+                  Never simultaneously zero during normal operation.
 
-    val1        : VARIABLE numeric field — CONFIRMED SEMANTICS (Phase 3):
-                  val1=0 when probe received NO REPLY ($M=60000, link down)
-                  val1>0 when link is active — value varies each probe cycle
-                  Observed range: 0, 3, 4, 5 (varies with link quality/load)
-                  Hypothesis: count of active FlexNet links on the sending node,
-                  or a rolling link-quality counter. Zero = isolated node.
-
-    val2        : LOW-RANGE numeric field — CONFIRMED SEMANTICS (Phase 3):
-                  val2=0 when probe received NO REPLY ($M=60000, link down)
-                  val2>0 when link is active — value varies each probe cycle
-                  Observed range: 0, 2, 3, 4, 5
-                  Hypothesis: similar to val1, possibly active neighbor count
-                  or a different quality metric. Zero = isolated node.
-
-                  KEY RULE (confirmed from Phase 3): val1=0 AND val2=0
-                  together are a RELIABLE indicator that the sending node
-                  received no L3RTT reply on this link ($M=60000).
-                  They are never simultaneously zero during normal operation.
-
-    node_serial : Fixed decimal integer, node-specific hardware identifier
-                  Different per node alias:
+    node_serial : Node-specific fixed identifier.
                     NETUHU (IR3UHU-2): 3076478712
                     BOLNET (IW2OHX-14): 67717840
-                  Fixed for the lifetime of the node installation.
-                  Set at Xnet install time or derived from hardware.
 
-    NODE_ALIAS  : 6-char node name (e.g. NETUHU, BOLNET)
-                  Alias of the NODE SENDING the probe, not the receiver.
+    NODE_ALIAS  : 6-char name of the NODE SENDING the probe.
 
-    $M<rtt>     : Measured RTT in 100ms units
-                  $M=60000 = probe failed (link down or no reply)
-                  $M=19    = 1.9s RTT (typical for AXUDP tunnel)
-                  $M=6     = 0.6s RTT (good RF link)
+    $M<rtt>     : RTT in 100ms units. $M=60000 = no reply.
 
-    $N          : End-of-record sentinel token
+    $N          : End-of-record sentinel.
 
-  LT field (in L3 frame header, not payload):
-    LT=2 : this node initiated the polling session
-    LT=1 : this node is the responder
-    ~4% exceptions at link recovery events
-
-  RTT echo mechanism:
-    1. Node A sends L3RTT with counter=C1 (LT=2)
-    2. Node B echoes counter=C1 back (LT=1)
-    3. Node A measures elapsed time -> $M
-    4. Both nodes use this $M as link cost in D-table advertisements
+  LT field: LT=2=initiator, LT=1=responder. ~4% exceptions at link recovery.
 
 
-### D_TABLE — Destination table exchange (NET/ROM PID)
+### D_TABLE — Destination table exchange
 
   Monitor format : CALLSIGN-SSID   RTT/SSID_MAX  [PORT[TYPE] 'ALIAS']
-  D command format: CALLSIGN  SSID_LO-SSID_HI  RTT  (4 entries per line)
+  D command format: CALLSIGN  SSID_LO-SSID_HI  RTT  (4 entries/line)
 
-  Fields:
-    RTT=60000  : distance-vector infinity / poison reverse
-    PORT       : 0=RF, 1=HAMNET/AMPRNet, 16-23=AXIP/AXUDP tunnel links
-    TYPE       : 8=Xnet/DAMA, 7=FlexNet, 6=BPQ, 5=JNOS, 4=legacy
-    ALIAS      : 6-char name, only present for aliased FlexNet nodes
+  RTT=60000 = poison reverse. PORT: 0=RF, 1=HAMNET, 16-23=AXIP/AXUDP.
+  TYPE: 8=Xnet/DAMA, 7=FlexNet, 6=BPQ, 5=JNOS, 4=legacy.
 
-  Multi-port example: VA3BAL  39/6  0[7] 'XRBAL'  1[7] '44.135.92.2/32'  19[4] ?
-
-  D_TABLE during link disruption (Phase 3 observation):
-    When the FlexNet link to IR3UHU-2 was removed (RO FL D 11 IR3UHU-2),
-    IW2OHX-14 immediately sent a D_TABLE to IR3UHU-2 advertising all
-    destinations with RTT=60000 (poison reverse for that link).
-    IR3UHU-2 continued sending its full D_TABLE to IW2OHX-14 on the
-    next polling cycle (~49s later) — 73 D_TABLE frames observed during
-    the DISABLED phase via the still-active NET/ROM session.
+  On link drop: immediate D_TABLE with all RTT=60000 (t=0.0s).
+  D_TABLE over NET/ROM continues even when CE native session is down.
 
 
-### User session transit frames (CREQ/CACK/DREQ/DACK/I/IACK)
+### CREQ / CACK — Connection request / acknowledgement (Phase 4)
 
-  ~20 CREQ + ~85 I frames per hour as transit traffic.
-  Full payload structure: NOT YET DECODED (Phase 4 investigation item).
+  CREQ: L3 fm <node> to <dest> LT <lt> CREQ IN=<in> ID=<id> Window=4 <originator> <forwarding_node>
+  CACK: L3 fm <node> to <node> LT <lt> CACK IN=<in> ID=<id> Window=4
+
+  originator    : ORIGINATING USER CALLSIGN -- identity preserved at L3.
+  forwarding    : local node callsign forwarding the CREQ.
+  Window        : always 4.
+  ID            : session ID, constant for session lifetime.
+
+  Multi-hop: CREQ propagates forward through all hops. CACK comes from the
+  final destination node directly (not from the intermediate neighbor).
+
+  LT values in CREQ/CACK: 11, 14, 17 observed. Packed field, exact bits TBD.
+  Different from the LT=1/2 used in L3RTT.
+
+
+### DREQ / DACK — Disconnect request / acknowledgement
+
+  Same structure as CREQ/CACK but no callsign payload.
+
+
+### I / IACK — User data frames (transit)
+
+  I:    L3 fm <src> to <dst> LT <lt> I IN=<in> ID=<id> S(<seq>) R(<ack>) [<len>]
+  IACK: L3 fm <src> to <dst> LT <lt> IACK IN=<in> ID=<id> S(<seq>) R(<ack>)
+
+
+### Identity preservation — CONFIRMED (Phase 4)
+
+  FlexNet preserves the originating user callsign using AX.25 DIGIPEATER
+  SEMANTICS -- NOT by rewriting L3 fields as NET/ROM does.
+
+  The user callsign is the AX.25 L2 SOURCE ADDRESS throughout.
+  Intermediate nodes appear in the via field, marked with * when heard.
+
+  Example (IW7BIA-15 -> IR5S via IW2OHX-14 and IR3UHU-2):
+    IW7BIA-15 to IR5S via IW2OHX-14* IR3UHU-2  ctl SABM+
+    IR5S to IW7BIA-15 via IR3UHU-2* IW2OHX-14  ctl UA-
+
+  Example (IW2OHX via RF digi DB0FHN -> IW2OHX-14 -> IR3UHU-2 -> IR5S):
+    IW2OHX to IR5S via DB0FHN* IW2OHX-14* IR3UHU-2  ctl SABM+
+    IR5S to IW2OHX via IR3UHU-2* IW2OHX-14 DB0FHN   ctl UA-
+
+  The CREQ L3 payload also carries the originator explicitly:
+    CREQ payload: <originating_callsign> <forwarding_node>
 
 ---
 
 ## PID=CE (0xCE) — Native FlexNet Protocol
 
-### CE type-0 — Link setup / init handshake — NEWLY DECODED (Phase 3)
+### CE SSID encoding — CONFIRMED for all values 0-15 (item #6)
 
-  5-byte frame carrying SSID range and capability flags.
-  Sent immediately when a FlexNet AX.25 session is established.
+  ALL CE frames use the same SSID encoding: SSID value N = ASCII char (0x30 + N)
 
-  Wire format:
-    Byte 0: 0x30           (init handshake marker, always 0x30)
-    Byte 1: 0x30 + max_ssid (upper SSID bound: 0x3E = 14, 0x32 = 2)
-    Byte 2: 0x25           (capability flags)
-    Byte 3: 0x21           (capability flags)
-    Byte 4: 0x0D           (CR terminator)
+  N=0..9  -> '0'..'9'  (0x30..0x39, decimal digits)
+  N=10    -> ':'        (0x3A)
+  N=11    -> ';'        (0x3B)
+  N=12    -> '<'        (0x3C)
+  N=13    -> '='        (0x3D)
+  N=14    -> '>'        (0x3E)
+  N=15    -> '?'        (0x3F)
 
-  Examples observed:
-    IW2OHX-14 -> IR3UHU-2:  0x30 0x3E 0x25 0x21 0x0D  (max_ssid=14)
-    IW2OHX-14 -> IW2OHX-13: 0x30 0x32 0x25 0x21 0x0D  (max_ssid=2)
+  Consistent across ALL CE frame types: type-0 init, compact records, type-6/7.
+  Confirmed from 86 CE frames with SSID>=10 in the 1h capture. Examples:
+    OE2XZR;;140  -> OE2XZR SSID=11 RTT=140
+    OE2XZR==140  -> OE2XZR SSID=13 RTT=140
+    HB9AK >>842  -> HB9AK  SSID=14 RTT=842
+    IK1NHL4?5    -> IK1NHL SSID=4, indirect RTT=5
 
-  Error response from Xnet when link not configured:
-    '02%! FlexLink:No Link to 11:IR3UHU-2 defined'
-    Observed when IR3UHU-2 tries to reconnect after RO FL D.
+  DISAMBIGUATION: '?' has two meanings:
+    As SSID (0x3F = SSID 15): in the callsign+SSID field position
+    As RTT prefix (indirect):  immediately before the RTT digits
+  Context determines which -- SSID follows callsign, prefix follows SSID.
 
-  Init message on successful reconnect:
-    '02%! FlexLink:Init fm IR3UHU-2/2 (25 21)'
-    Indicates Xnet accepted the link setup after RO FL A.
-
-  IMPORTANT: Byte 0 MUST always be 0x30 (not 0x30+min_ssid).
-    If min_ssid=3, byte 0 would be 0x33 which Xnet interprets as
-    a routing data frame (type '3'), breaking the handshake.
+  Parser: ssid = ord(c) - 0x30  for c in range '0'..'?' (0x30..0x3F)
 
 
-### CE type-1 — Link time measurement — NEWLY DECODED (Phase 3)
+### CE type-0 — Link setup / init handshake (Phase 3)
 
-  Reports link delay in 100ms ticks. Sent after keepalive exchange.
-
-  Format: '1' <decimal_integer> '\r'
-  Example: '1600\r' = 600 ticks = 60,000ms = initial/infinity value
-  Example: '12\r'   = 2 ticks   = 200ms delay (normal)
-
-  Observed during Phase 3 recovery:
-    At +68.6s after RO FL A: IR3UHU-2 sends '1600\r' (initial value)
-    Value converges from 600 down to single digits over several cycles.
-    The neighbor uses this to compute the Q/T link quality metric.
+  5 bytes: 0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D
+  Byte 0 MUST be 0x30. Using 0x30+min_ssid misclassifies as routing type '3'.
+  Error response: '02%! FlexLink:No Link to N:CALL defined'
+  Success: '02%! FlexLink:Init fm IR3UHU-2/2 (25 21)'
 
 
-### CE type-2 — Keepalive / null frame — FULLY CONFIRMED
+### CE type-1 — Link time measurement (Phase 3)
 
-  Total length: 241 bytes (fixed)
-  Structure:
-    Byte 0        : 0x32 ('2')
-    Bytes 1-237   : 0x20 (space, 237 bytes)
-    Bytes 238-240 : 0x31 0x30 0x0D ('10' + CR)
+  Format: '1' <decimal_ticks> '\r'
+  Initial: '1600\r' (600 ticks = RTT_INFINITY). Converges down over cycles.
+  Used by neighbor for Q/T link quality metric.
 
-  Period: ~189s average.
-  Implementation: b'\x32' + b'\x20'*237 + b'\x31\x30\x0d' as single AX.25 I-frame.
 
-  TCP DELIVERY SPLIT: when viewed via telnet monitor, the 241-byte frame
-  arrives in two TCP chunks. The '10\r'/'11\r'/'12\r' tail fragments
-  seen in captures are NOT separate protocol messages — they are keepalive
-  tails orphaned by TCP segmentation. AX.25 delivers the frame atomically.
+### CE type-2 — Keepalive / null frame (confirmed)
+
+  241 bytes: 0x32 + 237x 0x20 + 0x31 0x30 0x0D. Period ~189s.
+  Send as single AX.25 I-frame: b'\x32' + b'\x20'*237 + b'\x31\x30\x0d'
+  TCP SPLIT: telnet monitor delivers in two chunks. '10\r'/'11\r'/'12\r'
+  tail fragments are NOT separate messages -- keepalive tails only.
 
 
 ### CE type-3 — Routing data / token exchange
 
-  Token signals (3 bytes):
-    '3+\r' (0x33 0x2B 0x0D) : request token / ready to send routes
-    '3-\r' (0x33 0x2D 0x0D) : release token / end of routing batch
+  Tokens: '3+\r' = request token, '3-\r' = release token. Bidirectional pairs.
+  Compact records: '3' [CALLSIGN SSID RTT]+ ['+' | '-']? CR
+    SSID: 0x30+N encoding. '?' RTT prefix = indirect measurement.
+  Triggered at cycle boundaries (~240s), NOT on individual RTT changes.
 
-  These always appear in matched pairs (one per direction, same second).
-  During Phase 3 POST phase: 8 pairs observed — high route churn as
-  network reconverges after link restoration.
 
-  Compact routing records:
-    Format: '3' [CALLSIGN SSID RTT]+ ['+' | '-']? CR
-    SSID: 1-2 digits immediately following callsign
-    RTT: decimal, 100ms units; '?' prefix = indirect measurement
+### CE type-6 — D command path query (Phase 4)
 
-  CE ROUTING TRIGGER CONDITIONS — CONFIRMED (Phase 3):
-    CE compact records are sent at polling cycle boundaries (~240s),
-    NOT as real-time triggered updates on RTT changes.
-    No CE routing frames observed in the first 30s after link drop.
-    The fast-convergence mechanism is the D_TABLE poison-reverse (t=0.0s),
-    not CE compact frames.
+  Multi-hop destinations only. Direct neighbors = local lookup, no frame sent.
+  Format: '6' <flags> '    ' <seq> <originator> ' ' <next-hop> ' ' <dest> '\r'
+  flags='!', length ~30 bytes.
+
+
+### CE type-7 — D command path reply (Phase 4)
+
+  Format: '7' <flags> '    ' <seq> <originator> ' ' <next-hop> [' ' <hop>...] ' ' <dest> '\r'
+  flags='$', length ~38+ bytes. Each hop appends itself.
+  Example: '7$    1IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S'
+  Path to IR5S: IW2OHX-14 -> IR3UHU-2 -> IQ5KG-7 -> IR5S
 
 ---
 
 ## PID=F0 (0xF0) — AX.25 UI Beacon
 
-  Destination: QST, period: ~120s, purpose: node identification.
+  Destination: QST, period ~120s.
+  Example: '"IW2OHX-14 - Digi (X)Net DLC7 di Bollate (MI)"'
 
 ---
 
-## Link Disruption Sequence (Phase 3 — confirmed from live capture)
+## Link Disruption Sequence (Phase 3)
 
-  Command issued: RO FL D 11 IR3UHU-2
-
-  t= 0.0s : DISC+    IW2OHX-14->IR3UHU-2    AX.25 L2 disconnect (immediate)
-  t= 0.0s : UA-      IR3UHU-2->IW2OHX-14    disconnect acknowledged
-  t= 0.0s : CE +/-   both directions         token exchange at cycle boundary
-  t= 0.0s : D_TABLE  IW2OHX-14->IR3UHU-2    poison-reverse: all RTT=60000
-  t= 0.0s : CE init  IW2OHX-14->IR3UHU-2    IW2OHX-14 tries CE re-init
-  t= 7.4s : SABM+    IR3UHU-2->IW2OHX-14    IR3UHU-2 tries to reconnect
-  t= 7.4s : UA-      IW2OHX-14->IR3UHU-2    L2 accepted (NET/ROM still works)
-  t= 7.5s : CE err   IR3UHU-2->IW2OHX-14    'FlexLink:No Link to 11:IR3UHU-2 defined'
-  t=49.0s : D_TABLE  IR3UHU-2->IW2OHX-14    IR3UHU-2 sends full table next cycle
-  t=197s  : CE err   IR3UHU-2->IW2OHX-14    IR3UHU-2 retries init, error again
-
-  Command issued: RO FL A 11 IR3UHU-2
-
-  t=31s   : L3RTT    IW2OHX-14->IR3UHU-2    LT=2, new polling cycle starts
-  t=65s   : CE init  IR3UHU-2->IW2OHX-14    'FlexLink:Init fm IR3UHU-2/2 (25 21)'
-  t=65s   : CE init  IW2OHX-14->IR3UHU-2    0x30 0x3E 0x25 0x21 0x0D confirm
-  t=68s   : CE KA    IW2OHX-14->IR3UHU-2    first keepalive of restored session
-  t=68s   : CE LT    IR3UHU-2->IW2OHX-14    '1600\r' (initial link-time value)
-  t=410s  : CE +/-   both directions         route exchange resumes, reconverging
-
-  Key observations:
-    - AX.25 disconnect is IMMEDIATE on RO FL D (t=0.0s)
-    - IR3UHU-2 retries within 7.4s — NET/ROM L2 accepted, CE rejected
-    - Poison-reverse D_TABLE is sent at t=0.0s (not deferred to next cycle)
-    - D_TABLE exchange over NET/ROM continues throughout FlexNet outage
-    - CE native session reinitialises within ~65s of RO FL A
-    - Link-time starts at 600 (RTT_INFINITY) and converges down over cycles
+  RO FL D 11 IR3UHU-2:
+    t=0.0s : DISC/UA, CE +/-, D_TABLE RTT=60000 (all immediate)
+    t=7.4s : IR3UHU-2 reconnects L2, gets CE error
+    t=49s  : D_TABLE over NET/ROM continues
+  RO FL A 11 IR3UHU-2:
+    t=31s  : L3RTT resumes | t=65s: CE reinit | t=68s: KA + '1600\r' LT
+    t=410s : CE route exchange resumes
 
 ---
 
-## Polling Cycle Structure (~240 seconds / 4 minutes)
+## Polling Cycle Structure (~240 seconds)
 
-  [AX.25 SABM/UA] — not visible in monitor +11 (PID-less L2, filtered out)
+  [AX.25 SABM/UA] not visible in monitor +11
   ~19x L3RTT probe (LT=2) + reply (LT=1) + RR acks
-  Full D-table exchange both directions (~32+29 I-frames, PID=CF)
+  Full D-table exchange both directions (PID=CF)
   CE token exchange: 3+\r + compact records + 3-\r per direction
   [AX.25 DISC/UA]
   Between cycles: CE keepalive every ~189s
-
-  1h capture statistics: 21 L3RTT, 22 D-TABLE, 184 RR,
-  140 CE (43 keepalive, 93 routing, 4 status), 0 SABM/DISC (filtered)
 
 ---
 
 ## Routing Algorithm
 
-  Type: Distance-vector, metric=RTT (100ms units), infinity=60000
-  Full table every ~4 minutes + CE token-gated route exchange per cycle
-  Poison reverse: RTT=60000 advertised immediately on link drop (t=0.0s)
-
-  Priority order (DCC1995):
-    1. Destination table (autorouter, RTT-based)
-    2. Link table (sysop-configured)
-    3. Heard list (last 200 callsigns)
-    4. SSID routing
+  Distance-vector, metric=RTT (100ms), infinity=60000.
+  Poison reverse at t=0.0s on link drop.
+  Priority: destination table > link table > heard list > SSID routing.
 
 ---
 
-## Key Constants (confirmed)
+## Key Constants (all confirmed)
 
   RTT unit              : 100ms
   RTT infinity          : 60000
   Polling interval      : ~240s
-  Probes per cycle      : ~19 per direction
-  CE keepalive period   : ~189s average
-  CE keepalive length   : 241 bytes = 0x32 + 237x 0x20 + 0x31 0x30 0x0D
+  CE keepalive          : 241 bytes = 0x32 + 237x 0x20 + 0x31 0x30 0x0D
   CE init frame         : 5 bytes = 0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D
-  CE link-time initial  : '1600\r' (600 = RTT_INFINITY ticks)
-  Beacon period         : ~120s (F0 UI to QST)
+  CE link-time initial  : '1600\r' (600 ticks)
+  CE SSID encoding      : ord(c) - 0x30 for c in '0'..'?' (0x30..0x3F)
+  CE type-6 query       : ~30 bytes, flags='!'
+  CE type-7 reply       : ~38+ bytes per hop, flags='$'
+  CREQ Window           : always 4
+  CREQ session ID       : ID field, constant for session lifetime
   T3 default (Xnet)     : 180000ms
 
 ---
 
-## Open Investigation Items (updated 2026-04-13 after Phase 3)
+## Investigation Status — ALL ITEMS RESOLVED
 
-  RESOLVED:
-    #3  Mystery '10\r' frames: TCP split of keepalive tail. Not a protocol msg.
-    #4  CE null frame layout: 0x32 + 237x 0x20 + '10\r' — confirmed.
-    #5  CE routing trigger: cycle-boundary token exchange, not immediate RTT.
-        Poison-reverse D_TABLE IS immediate (t=0.0s on link drop).
-    #1  val1: 0 when $M=60000 (no reply), non-zero when active. Confirmed.
-    #2  val2: 0 when $M=60000 (no reply), non-zero when active. Confirmed.
-        val1=0 AND val2=0 = reliable "link down / no L3RTT reply" indicator.
+  #1  val1=0 when $M=60000, non-zero when active. CONFIRMED.
+  #2  val2=0 when $M=60000, non-zero when active. val1=0 AND val2=0 = link-down. CONFIRMED.
+  #3  Mystery '10\r': TCP split of keepalive tail. Not a protocol message. RESOLVED.
+  #4  CE null frame: 0x32 + 237x 0x20 + '10\r'. CONFIRMED.
+  #5  CE trigger: cycle-boundary token exchange. D_TABLE poison-reverse IS immediate. CONFIRMED.
+  #6  CE SSID >=10: char substitution 0x30+N. 86 real-data examples confirmed. RESOLVED.
+  #8  D command: CE type-6/7 query-reply for multi-hop. Direct = local lookup only. DECODED.
+  #9  CREQ/CACK + identity: AX.25 digipeater semantics. L2 source = user callsign. DECODED.
+      CREQ payload: <originator> <forwarding_node>. CACK from final destination.
 
-  NEW DISCOVERIES (Phase 3):
-    CE type-0 init: 5-byte frame, byte1=0x30+max_ssid, caps 0x25 0x21
-    CE type-1 link time: '1<ticks>\r', initial=600 (RTT_INFINITY), converges
-    Xnet error on missing link: '02%! FlexLink:No Link to N:CALL defined'
-    IR3UHU-2 reconnects within 7.4s of link drop (NET/ROM L2 accepted)
-    D_TABLE exchange over NET/ROM continues throughout CE outage
-
-  STILL OPEN:
-    #6  CE SSID boundary for SSID>=10: untested, low risk.
-    #8  D command path trace: issue D while monitor runs, observe wire.
-    #9  CREQ/CACK user session + identity preservation: Phase 4, critical.
+  Minor open: LT field in CREQ/CACK (values 11,14,17,4) — packed, exact bits TBD.
+  Does not affect basic implementation.
 
 ---
 
-## Xnet Internal Processes
+## Implementation Notes (complete)
 
-  FlexRTT, FlexLink, INP, Link, RxNRBC
-
----
-
-## Implementation Notes
-
-  1.  AX.25 connected session to each FlexNet neighbor (L2)
-  2.  On connect: send CE type-0 init (0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D)
+  1.  AX.25 connected session to each FlexNet neighbor
+  2.  On connect: CE type-0 init (0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D)
   3.  Every ~240s: ~19 L3RTT pairs (PID=CF) then full D-table exchange
-  4.  After first keepalive: send CE type-1 link time ('1600\r', converges down)
+  4.  After first keepalive: CE type-1 link time ('1600\r', converges down)
   5.  Every ~90s: CE keepalive — 241 bytes as single AX.25 I-frame
   6.  CE route exchange: '3+\r' + compact records + '3-\r' per cycle
-  7.  On link drop: immediately advertise RTT=60000 for all affected destinations
-  8.  L3RTT payload: val1=val2=0 when no reply, non-zero when active
-  9.  Distance-vector, metric=RTT, infinity=60000, poison reverse
-  10. TYPE=8, ALIAS required for named nodes, LT=2 if initiator
-  11. Do NOT reconstruct keepalive bytes from telnet monitor hex (TCP splits it)
+  7.  On link drop: immediately advertise RTT=60000 for all affected dests
+  8.  L3RTT: val1=val2=0 when no reply, non-zero when active
+  9.  Distance-vector routing, metric=RTT, infinity=60000, poison reverse
+  10. TYPE=8, ALIAS required, LT=2 if L3RTT initiator
+  11. D command (multi-hop): CE type-6 to next-hop, await type-7 reply
+  12. D command (direct): local D-table lookup, no frames
+  13. CREQ: originator=user_callsign, forwarding=local_callsign, Window=4
+  14. Identity: L2 source = user callsign. Intermediate nodes = AX.25 digipeaters.
+  15. CE SSID parser: ssid = ord(c) - 0x30, for c in '0'..'?'
+  16. Do NOT reconstruct keepalive from telnet monitor hex (TCP splits it)
 
 ---
 
@@ -337,3 +284,4 @@
   - phase1_results.json : clean ASCII capture (monitor -x +11), April 2026
   - phase2_results.json : CE frame classification analysis, April 2026
   - phase3_results.json : link disruption capture (RO FL D/A), April 2026
+  - phase4_monitor.txt : D command + user session capture, April 2026
