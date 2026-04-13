@@ -13,17 +13,39 @@
 #include <syslog.h>     /* must come BEFORE flexnetd.h */
 #include "flexnetd.h"
 
-int g_log_level  = LOG_LEVEL_INFO;
-int g_use_syslog = 0;
+int   g_log_level  = LOG_LEVEL_INFO;
+int   g_use_syslog = 0;
+FILE *g_log_file   = NULL;
+
+/*
+ * write_timestamped — write a timestamped log line to a FILE stream.
+ * Used for both stderr and the optional log file.
+ */
+static void write_timestamped(FILE *fp, const char *tag,
+                               const char *fmt, va_list ap)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+
+    fprintf(fp, "%04d-%02d-%02d %02d:%02d:%02d.%03ld [%s] ",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+            tm.tm_hour, tm.tm_min, tm.tm_sec,
+            ts.tv_nsec / 1000000L,
+            tag);
+    vfprintf(fp, fmt, ap);
+    fprintf(fp, "\n");
+    fflush(fp);
+}
 
 void flexnetd_log(int level, const char *tag, const char *fmt, ...)
 {
     if (level > g_log_level) return;
 
-    va_list ap;
-    va_start(ap, fmt);
-
     if (g_use_syslog) {
+        va_list ap;
+        va_start(ap, fmt);
         /*
          * Map our levels to syslog priorities.
          * Use the raw integer values to avoid the LOG_ERR macro clash.
@@ -37,22 +59,20 @@ void flexnetd_log(int level, const char *tag, const char *fmt, ...)
             default:              priority = 7; break;  /* LOG_DEBUG   */
         }
         vsyslog(priority, fmt, ap);
+        va_end(ap);
     } else {
         /* print to stderr with ISO timestamp and level tag */
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        struct tm tm;
-        gmtime_r(&ts.tv_sec, &tm);
-
-        fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d.%03ld [%s] ",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                tm.tm_hour, tm.tm_min, tm.tm_sec,
-                ts.tv_nsec / 1000000L,
-                tag);
-        vfprintf(stderr, fmt, ap);
-        fprintf(stderr, "\n");
-        fflush(stderr);
+        va_list ap;
+        va_start(ap, fmt);
+        write_timestamped(stderr, tag, fmt, ap);
+        va_end(ap);
     }
 
-    va_end(ap);
+    /* If a log file is open, ALWAYS write there too (console + file) */
+    if (g_log_file) {
+        va_list ap2;
+        va_start(ap2, fmt);
+        write_timestamped(g_log_file, tag, fmt, ap2);
+        va_end(ap2);
+    }
 }

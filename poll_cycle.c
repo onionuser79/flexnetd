@@ -161,24 +161,26 @@ static int run_dcommand_cycle(int fd)
 /* ── NATIVE CE/CF MODE ───────────────────────────────────────────────── */
 
 /*
- * CE link setup frame bytes (payload without PID byte):
- *   0x3e 0x25 0x21 0x0d  (monitor shows "len 5" including the PID byte)
+ * ce_send_init_response — send our CE init handshake to the peer.
  *
- * In pipe mode we receive the 4 raw payload bytes — the PID (0xCE) has
- * already been stripped by ax25d before piping to us.
- *
- * FLXDECOD.DLL decode: "Initial Handshake. Upper SSID: %d"
+ * Always builds a proper init frame via ce_build_link_setup() with
+ * byte 0 = 0x30 (init marker).  Never echoes raw received frames —
+ * that would send byte 0 = 0x3E in pipe mode, which strict peers
+ * misclassify as a CE type-6 destination query.
  */
-#define CE_LINK_SETUP_BYTE   0x3e
-#define CE_LINK_SETUP_LEN    4      /* payload bytes without PID */
-
-static int ce_send_link_setup(int fd, const uint8_t *frame, int len)
+static int ce_send_init_response(int fd)
 {
-    LOG_INF("ce_send_link_setup: fd=%d len=%d", fd, len);
-    if (len > 0)
-        LOG_INF("ce_send_link_setup: bytes: %02X %02X %02X %02X",
-                len > 0 ? frame[0] : 0, len > 1 ? frame[1] : 0,
-                len > 2 ? frame[2] : 0, len > 3 ? frame[3] : 0);
+    uint8_t frame[8];
+    int len = ce_build_link_setup(frame, sizeof(frame),
+                                  g_cfg.min_ssid, g_cfg.max_ssid);
+    if (len < 0) {
+        LOG_ERR("ce_send_init_response: ce_build_link_setup failed");
+        return -1;
+    }
+    LOG_INF("ce_send_init_response: fd=%d bytes: %02X %02X %02X %02X %02X "
+            "(SSID %d-%d)",
+            fd, frame[0], frame[1], frame[2], frame[3], frame[4],
+            g_cfg.min_ssid, g_cfg.max_ssid);
     return ax25_send(fd, PID_CE, frame, len);
 }
 
@@ -199,16 +201,13 @@ static int send_own_routes(int fd)
     uint8_t req[] = { '3', '+', '\r' };
     ax25_send(fd, PID_CE, req, 3);
 
-    /* Our route: CALL(6) SSID_LO(1) SSID_HI(1) RTT(digits) ' ' */
-    char route[32];
-    int rlen = snprintf(route, sizeof(route),
-        "3%-6.6s%c%c%d \r",
-        base,
-        (char)(0x30 + g_cfg.min_ssid),
-        (char)(0x30 + g_cfg.max_ssid),
-        1);  /* RTT=1 (local/direct) */
-    if (rlen > 0 && rlen < (int)sizeof(route))
-        ax25_send(fd, PID_CE, (uint8_t *)route, rlen);
+    /* Our route via ce_build_record (single wire-format source) */
+    uint8_t route[64];
+    int rlen = ce_build_record(route, sizeof(route),
+                               base, g_cfg.min_ssid, g_cfg.max_ssid,
+                               1, 0);  /* RTT=1 (local/direct), not indirect */
+    if (rlen > 0)
+        ax25_send(fd, PID_CE, route, rlen);
 
     /* Release token */
     uint8_t rel[] = { '3', '-', '\r' };
@@ -232,8 +231,6 @@ static int run_native_ce_session(int fd)
     LOG_INF("run_native_ce_session: waiting for CE frames from %s",
             g_cfg.neighbor);
 
-    uint8_t setup_frame[8] = {0};   /* store full link setup frame */
-    int     setup_frame_len = 0;
     int     got_setup    = 0;
     int     merged_total = 0;
     time_t  t_start      = time(NULL);
@@ -284,29 +281,32 @@ static int run_native_ce_session(int fd)
 
         /* ── Detect frame type from content ─────────────────────── */
 
-        /* Link setup: first byte 0x3e '>' */
-        if (buf[0] == CE_LINK_SETUP_BYTE) {
-            LOG_INF("run_native_ce_session: CE link setup (len=%d)", len);
+        /* Link setup (pipe mode): byte 0 = 0x3E '>' when ax25d strips PID.
+         * In pipe mode the leading 0x30 (init marker) is consumed by ax25d,
+         * so byte[0] is the max_ssid byte (0x30+ssid, e.g. 0x3E for ssid=14).
+         * Detect by: first byte in 0x30..0x3F range, followed by 0x25 0x21 0x0D.
+         */
+        if (buf[0] >= 0x30 && buf[0] <= 0x3F &&
+            len >= 4 && buf[1] == 0x25 && buf[2] == 0x21 && buf[3] == 0x0D) {
+            int peer_max_ssid = (int)(buf[0]) - 0x30;
+            LOG_INF("run_native_ce_session: CE link setup (pipe mode) "
+                    "peer_max_ssid=%d (len=%d)", peer_max_ssid, len);
 
             if (!got_setup) {
-                /* Save and echo back */
-                setup_frame_len = len < (int)sizeof(setup_frame)
-                                  ? len : (int)sizeof(setup_frame);
-                memcpy(setup_frame, buf, (size_t)setup_frame_len);
                 got_setup = 1;
 
-                int r = ce_send_link_setup(fd, setup_frame, setup_frame_len);
+                /* Send a proper init response — never echo raw frame */
+                int r = ce_send_init_response(fd);
                 if (r < 0)
-                    LOG_WRN("run_native_ce_session: link setup send failed");
+                    LOG_WRN("run_native_ce_session: init response failed");
                 else
-                    LOG_INF("run_native_ce_session: link setup response sent");
+                    LOG_INF("run_native_ce_session: init response sent "
+                            "(byte0=0x30)");
 
-                /* Send keepalive to establish heartbeat rhythm */
                 send_ce_keepalive(fd);
             } else {
                 LOG_DBG("run_native_ce_session: duplicate link setup ignored");
             }
-            /* Reset inactivity timer on each link setup */
             t_start = time(NULL);
             continue;
         }
@@ -346,18 +346,24 @@ static int run_native_ce_session(int fd)
         /* Init handshake: '0' prefix (FLXDECOD: "Initial Handshake")
          *
          * In socket mode (server) the full CE payload arrives as
-         * 30 3E 25 21 0D — first byte is 0x30, NOT 0x3E.
-         * The CE_LINK_SETUP_BYTE (0x3E) handler only fires in pipe
-         * mode where ax25d strips the PID.  We must set got_setup
-         * here too so the route advertisement condition works. */
+         * 30 3E 25 21 0D — first byte is 0x30 ('0'), NOT 0x3E.
+         * Parse the peer's upper SSID and send our own init response
+         * with byte 0 = 0x30 (correct init marker). */
         if (buf[0] == '0') {
             int upper_ssid = 0;
             int r = ce_parse_frame(buf, len, NULL, &upper_ssid, NULL);
             if (r == CE_FRAME_INIT) {
                 LOG_INF("run_native_ce_session: init handshake "
-                        "upper_ssid=%d", upper_ssid);
+                        "peer_upper_ssid=%d", upper_ssid);
                 got_peer_init = 1;
                 got_setup     = 1;  /* enables route advert trigger */
+
+                /* Reply with our own init (byte0=0x30 always) */
+                int ir = ce_send_init_response(fd);
+                if (ir < 0)
+                    LOG_WRN("run_native_ce_session: init response failed");
+                else
+                    LOG_INF("run_native_ce_session: init response sent");
             }
             t_start = time(NULL);
             continue;
@@ -533,21 +539,34 @@ static int run_native_ce_session(int fd)
                         "c1=%u c2=%u c3=%u c4=%u $M=%u alias=%s",
                         c1, c2, c3, c4, max_dest, alias);
 
-                /* Build reply: keep original c1/c2, fill c3/c4
-                 * with our timestamps so peer can measure RTT. */
+                /* Build reply: keep original c1/c2, fill c3/c4.
+                 *
+                 * L3RTT val1/val2 semantics (confirmed from Phase 3
+                 * disruption capture):
+                 *   c3=0, c4=0  when $M=60000 (link down, no routes)
+                 *   c3=recv,c4=send  when link active (routes present)
+                 * Incorrect non-zero values during link-down impair
+                 * Q/T convergence at the peer. */
                 uint32_t send_tick = get_uptime_ticks();
+                int reachable = dtable_count_reachable();
+                uint32_t reply_c3 = (reachable > 0) ? recv_tick : 0;
+                uint32_t reply_c4 = (reachable > 0) ? send_tick : 0;
+
+                LOG_INF("run_native_ce_session: L3RTT reply "
+                        "reachable=%d c3=%u c4=%u",
+                        reachable, reply_c3, reply_c4);
+
                 uint8_t reply[256];
                 int rlen = cf_build_l3rtt(reply, (int)sizeof(reply),
-                                          c1, c2, recv_tick, send_tick,
+                                          c1, c2, reply_c3, reply_c4,
                                           g_cfg.alias,
                                           LEVEL3_VERSION_STR,
-                                          (uint32_t)dtable_count_reachable());
+                                          (uint32_t)reachable);
                 if (rlen > 0) {
                     ax25_send(fd, PID_CF, reply, rlen);
                     LOG_INF("run_native_ce_session: L3RTT reply sent "
                             "c3=%u c4=%u $M=%d",
-                            recv_tick, send_tick,
-                            dtable_count_reachable());
+                            reply_c3, reply_c4, reachable);
                 }
                 t_start = time(NULL);
                 continue;
