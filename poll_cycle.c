@@ -242,14 +242,16 @@ static int run_native_ce_session(int fd)
     int     sent_routes   = 0;      /* advertised our routes to peer    */
     time_t  last_dest_write = 0;    /* last time we wrote destinations  */
     time_t  last_stats_write = 0;   /* last time we wrote linkstats     */
+    struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
+    int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
     /* Initialize link stats for this session */
     memset(&g_link_stats, 0, sizeof(g_link_stats));
     snprintf(g_link_stats.neighbor, MAX_CALLSIGN_LEN, "%s", g_cfg.neighbor);
     g_link_stats.connect_time = t_start;
-    g_link_stats.qt           = 600;    /* start at infinity, converge down */
-    g_link_stats.rtt_last     = 600;
-    g_link_stats.rtt_smoothed = 600;
+    g_link_stats.qt           = 1;     /* direct link = Q/T 1 (best) */
+    g_link_stats.rtt_last     = 0;
+    g_link_stats.rtt_smoothed = 0;
     g_link_stats.active       = 1;
 
     /* Session timeout: 5 minutes of inactivity */
@@ -353,6 +355,9 @@ static int run_native_ce_session(int fd)
                     ax25_send(fd, PID_CE, lt_buf, lt_len);
                     g_link_stats.tx_bytes += lt_len;
                     g_link_stats.tx_frames++;
+                    /* Record send time for RTT measurement */
+                    clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                    lt_sent_pending = 1;
                 }
             }
 
@@ -403,16 +408,29 @@ static int run_native_ce_session(int fd)
                 LOG_INF("run_native_ce_session: peer link time = %ld "
                         "(100ms ticks)", link_time_ms);
 
-                /* Update link stats: Q/T converges from peer's
-                 * link time reports. rtt_smoothed uses simple
-                 * exponential smoothing: new = 0.75*old + 0.25*sample */
-                g_link_stats.rtt_last = (int)link_time_ms;
-                if (g_link_stats.rtt_smoothed >= 600)
-                    g_link_stats.rtt_smoothed = (int)link_time_ms;
-                else
-                    g_link_stats.rtt_smoothed =
-                        (g_link_stats.rtt_smoothed * 3 + (int)link_time_ms) / 4;
-                g_link_stats.qt = g_link_stats.rtt_smoothed;
+                /* Measure actual RTT: time since we sent our link-time
+                 * until we received the peer's link-time response.
+                 * Convert to 100ms ticks to match xnet L-table format. */
+                if (lt_sent_pending) {
+                    struct timespec now_ts;
+                    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+                    long rtt_ms = (now_ts.tv_sec - lt_sent_ts.tv_sec) * 1000L
+                                + (now_ts.tv_nsec - lt_sent_ts.tv_nsec) / 1000000L;
+                    int rtt_ticks = (int)(rtt_ms / 100);  /* 100ms ticks */
+                    g_link_stats.rtt_last = rtt_ticks;
+                    /* Exponential smoothing: 75% old + 25% new */
+                    if (g_link_stats.rtt_smoothed == 0 && keepalive_count <= 1)
+                        g_link_stats.rtt_smoothed = rtt_ticks;
+                    else
+                        g_link_stats.rtt_smoothed =
+                            (g_link_stats.rtt_smoothed * 3 + rtt_ticks) / 4;
+                    lt_sent_pending = 0;
+                    LOG_INF("run_native_ce_session: measured RTT=%ldms "
+                            "(%d ticks) smoothed=%d",
+                            rtt_ms, rtt_ticks, g_link_stats.rtt_smoothed);
+                }
+                /* Q/T = 1 for direct link (always) */
+                g_link_stats.qt = 1;
 
                 /* Reply with our own link time EVERY time.
                  * Xnet uses exponential smoothing — it needs repeated
@@ -425,6 +443,9 @@ static int run_native_ce_session(int fd)
                     ax25_send(fd, PID_CE, lt_buf, lt_len);
                     g_link_stats.tx_bytes += lt_len;
                     g_link_stats.tx_frames++;
+                    /* Also record this send for next RTT measurement */
+                    clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                    lt_sent_pending = 1;
                     LOG_DBG("run_native_ce_session: sent link time = 2");
                 }
             }
