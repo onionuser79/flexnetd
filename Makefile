@@ -12,11 +12,16 @@ TARGET  = flexnetd
 CFLAGS_COMMON = -Wall -Wextra -Wshadow -Wformat=2 -std=c11 -D_GNU_SOURCE -I.
 LDFLAGS = -lax25
 
-all: $(TARGET)
+all: $(TARGET) flexdest
 
 $(TARGET): $(SRCS) flexnetd.h
 	$(CC) $(CFLAGS_COMMON) -O2 -o $@ $(SRCS) $(LDFLAGS)
 	@echo "Built $(TARGET) (release)" && ls -lh $(TARGET)
+
+# flexdest: standalone destination query tool (no libax25 dependency)
+flexdest: flexdest.c
+	$(CC) $(CFLAGS_COMMON) -O2 -o $@ $<
+	@echo "Built flexdest" && ls -lh flexdest
 
 # Debug: symbols, no sanitisers — safe to run with sudo/root on aarch64
 debug: $(SRCS) flexnetd.h
@@ -46,16 +51,17 @@ check-deps:
 	    && echo "  axconfig.h: OK" \
 	    || echo "  axconfig.h: MISSING (part of libax25-dev)"
 
-install: $(TARGET)
+install: $(TARGET) flexdest
 	install -m 755 $(TARGET) $(SBINDIR)/$(TARGET)
-	@echo "Installed $(SBINDIR)/$(TARGET)"
+	install -m 755 flexdest $(SBINDIR)/flexdest
+	@echo "Installed $(SBINDIR)/$(TARGET) and $(SBINDIR)/flexdest"
 	@if [ ! -f $(CONFDIR)/flexnetd.conf ]; then \
 	    install -m 644 ../flexnetd.conf $(CONFDIR)/flexnetd.conf; \
 	    echo "Installed $(CONFDIR)/flexnetd.conf"; \
 	else echo "Skipped $(CONFDIR)/flexnetd.conf (exists)"; fi
 
 clean:
-	rm -f $(TARGET) $(TARGET)_debug $(TARGET)_asan *.o
+	rm -f $(TARGET) $(TARGET)_debug $(TARGET)_asan flexdest *.o
 	@echo "Cleaned"
 
 .PHONY: all debug asan syntax check-deps install clean
