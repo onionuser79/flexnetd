@@ -36,6 +36,7 @@ static void set_defaults(FlexConfig *cfg)
     cfg->infinity             = RTT_INFINITY;
     strcpy(cfg->gateways_file,    "/usr/local/var/lib/ax25/flex/gateways");
     strcpy(cfg->dest_file,        "/usr/local/var/lib/ax25/flex/destinations");
+    strcpy(cfg->linkstats_file,   "/usr/local/var/lib/ax25/flex/linkstats");
     cfg->log_level            = LOG_LEVEL_INFO;
     cfg->use_syslog           = 0;
     cfg->probe_count          = DEFAULT_PROBE_COUNT;
@@ -108,6 +109,8 @@ int config_load(const char *path, FlexConfig *cfg)
             snprintf(cfg->gateways_file, MAX_PATH_LEN, "%s", val);
         else if (!strcasecmp(key, "DestFile"))
             snprintf(cfg->dest_file, MAX_PATH_LEN, "%s", val);
+        else if (!strcasecmp(key, "LinkStatsFile"))
+            snprintf(cfg->linkstats_file, MAX_PATH_LEN, "%s", val);
         else if (!strcasecmp(key, "LogLevel"))
             cfg->log_level = atoi(val);
         else if (!strcasecmp(key, "Syslog"))
@@ -139,6 +142,7 @@ void config_dump(const FlexConfig *cfg)
     LOG_INF("  Infinity          : %d", cfg->infinity);
     LOG_INF("  GatewaysFile      : %s", cfg->gateways_file);
     LOG_INF("  DestFile          : %s", cfg->dest_file);
+    LOG_INF("  LinkStatsFile     : %s", cfg->linkstats_file);
     LOG_INF("  LogLevel          : %d", cfg->log_level);
     LOG_INF("  Syslog            : %s", cfg->use_syslog ? "yes" : "no");
     LOG_INF("==============================");

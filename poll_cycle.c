@@ -241,6 +241,16 @@ static int run_native_ce_session(int fd)
     int     got_peer_init = 0;      /* received peer's init handshake   */
     int     sent_routes   = 0;      /* advertised our routes to peer    */
     time_t  last_dest_write = 0;    /* last time we wrote destinations  */
+    time_t  last_stats_write = 0;   /* last time we wrote linkstats     */
+
+    /* Initialize link stats for this session */
+    memset(&g_link_stats, 0, sizeof(g_link_stats));
+    snprintf(g_link_stats.neighbor, MAX_CALLSIGN_LEN, "%s", g_cfg.neighbor);
+    g_link_stats.connect_time = t_start;
+    g_link_stats.qt           = 600;    /* start at infinity, converge down */
+    g_link_stats.rtt_last     = 600;
+    g_link_stats.rtt_smoothed = 600;
+    g_link_stats.active       = 1;
 
     /* Session timeout: 5 minutes of inactivity */
     while (time(NULL) - t_start < 300) {
@@ -263,6 +273,8 @@ static int run_native_ce_session(int fd)
 
         frame_count++;
         buf[len] = '\0';
+        g_link_stats.rx_bytes += len;
+        g_link_stats.rx_frames++;
 
         /* Log first byte of every frame for diagnostics */
         LOG_INF("run_native_ce_session: frame #%d pid=0x%02X len=%d "
@@ -316,6 +328,8 @@ static int run_native_ce_session(int fd)
             keepalive_count++;
             LOG_INF("run_native_ce_session: CE keepalive #%d", keepalive_count);
             send_ce_keepalive(fd);
+            g_link_stats.tx_bytes += CE_KEEPALIVE_LEN;
+            g_link_stats.tx_frames++;
 
             /* Send link time on every keepalive cycle so xnet can
              * converge its smoothed RTT.  Without this, Q/T stays
@@ -324,8 +338,11 @@ static int run_native_ce_session(int fd)
                 uint8_t lt_buf[32];
                 int lt_len = ce_build_link_time(lt_buf,
                                 (int)sizeof(lt_buf), 2);
-                if (lt_len > 0)
+                if (lt_len > 0) {
                     ax25_send(fd, PID_CE, lt_buf, lt_len);
+                    g_link_stats.tx_bytes += lt_len;
+                    g_link_stats.tx_frames++;
+                }
             }
 
             /* After first keepalive exchange with peer, the link is
@@ -337,6 +354,17 @@ static int run_native_ce_session(int fd)
                         "sending our routes");
                 send_own_routes(fd);
                 sent_routes = 1;
+            }
+
+            /* Update link stats snapshot */
+            g_link_stats.keepalive_count = keepalive_count;
+            g_link_stats.dst_count = dtable_count_reachable();
+
+            /* Write linkstats every 30s */
+            time_t now = time(NULL);
+            if (now - last_stats_write >= 30) {
+                output_write_linkstats();
+                last_stats_write = now;
             }
 
             t_start = time(NULL);
@@ -375,6 +403,17 @@ static int run_native_ce_session(int fd)
                 LOG_INF("run_native_ce_session: peer link time = %ld "
                         "(100ms ticks)", link_time_ms);
 
+                /* Update link stats: Q/T converges from peer's
+                 * link time reports. rtt_smoothed uses simple
+                 * exponential smoothing: new = 0.75*old + 0.25*sample */
+                g_link_stats.rtt_last = (int)link_time_ms;
+                if (g_link_stats.rtt_smoothed >= 600)
+                    g_link_stats.rtt_smoothed = (int)link_time_ms;
+                else
+                    g_link_stats.rtt_smoothed =
+                        (g_link_stats.rtt_smoothed * 3 + (int)link_time_ms) / 4;
+                g_link_stats.qt = g_link_stats.rtt_smoothed;
+
                 /* Reply with our own link time EVERY time.
                  * Xnet uses exponential smoothing — it needs repeated
                  * measurements to converge from the initial 600
@@ -384,6 +423,8 @@ static int run_native_ce_session(int fd)
                                 (int)sizeof(lt_buf), 2);
                 if (lt_len > 0) {
                     ax25_send(fd, PID_CE, lt_buf, lt_len);
+                    g_link_stats.tx_bytes += lt_len;
+                    g_link_stats.tx_frames++;
                     LOG_DBG("run_native_ce_session: sent link time = 2");
                 }
             }
@@ -596,6 +637,11 @@ static int run_native_ce_session(int fd)
             "link_time=%ldms last_token=%d",
             frame_count, merged_total, g_table.count, keepalive_count,
             link_time_ms, last_token);
+
+    /* Write final linkstats snapshot, then mark inactive */
+    g_link_stats.dst_count = dtable_count_reachable();
+    output_write_linkstats();
+    g_link_stats.active = 0;
 
     if (merged_total > 0 || g_table.count > 0) {
         output_write_destinations();

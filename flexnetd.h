@@ -107,6 +107,7 @@ typedef struct {
     int     infinity;
     char    gateways_file[MAX_PATH_LEN];
     char    dest_file[MAX_PATH_LEN];
+    char    linkstats_file[MAX_PATH_LEN];
     int     log_level;
     int     use_syslog;
     int     probe_count;
@@ -136,6 +137,25 @@ typedef struct {
 } DestTable;
 
 extern DestTable g_table;
+
+/* ── Link statistics (for L-table display) ──────────────────────────── */
+typedef struct {
+    char    neighbor[MAX_CALLSIGN_LEN];
+    int     port_num;               /* port index from config */
+    time_t  connect_time;           /* session start timestamp */
+    int     qt;                     /* Q/T quality value (from CE link time) */
+    int     rtt_last;               /* last RTT in 100ms ticks */
+    int     rtt_smoothed;           /* smoothed RTT */
+    long    tx_bytes;               /* cumulative bytes sent */
+    long    rx_bytes;               /* cumulative bytes received */
+    int     tx_frames;              /* frames sent */
+    int     rx_frames;              /* frames received */
+    int     keepalive_count;        /* keepalive exchanges */
+    int     dst_count;              /* reachable destinations */
+    int     active;                 /* 1 = session is live */
+} LinkStats;
+
+extern LinkStats g_link_stats;
 
 /* ── Function declarations ───────────────────────────────────────────── */
 /* flexnetd_log declared above with __attribute__((format)) */
@@ -204,6 +224,7 @@ void dtable_sort(void);
 
 int output_write_gateways(void);
 int output_write_destinations(void);
+int output_write_linkstats(void);
 
 int poll_cycle_run(int fd);
 int poll_cycle_run_mode(int fd, int mode);

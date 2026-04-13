@@ -361,8 +361,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (ensure_output_dir(g_cfg.gateways_file) < 0) return 1;
-    if (ensure_output_dir(g_cfg.dest_file)     < 0) return 1;
+    if (ensure_output_dir(g_cfg.gateways_file)  < 0) return 1;
+    if (ensure_output_dir(g_cfg.dest_file)      < 0) return 1;
+    if (ensure_output_dir(g_cfg.linkstats_file) < 0) return 1;
 
     dtable_init();
 
