@@ -1,4 +1,4 @@
-# FlexNet / (X)Net Protocol — Reverse Engineering Findings
+# FlexNet / (X)Net Protocol — Findings
 # Based on live captures from IW2OHX-14 <-> IR3UHU-2 and IW2OHX-14 <-> IW2OHX-13
 # Initial capture: 2026-04-10  |  Phase 1/2 captures: 2026-04-13  |  Phase 3: 2026-04-13
 # Author: IW2OHX + Claude Sonnet 4.6
