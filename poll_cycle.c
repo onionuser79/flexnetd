@@ -255,6 +255,17 @@ static int run_native_ce_session(int fd)
     /* Session timeout: 5 minutes of inactivity */
     while (time(NULL) - t_start < 300) {
 
+        /* Periodic linkstats update — runs every iteration (frames + idle) */
+        {
+            time_t now = time(NULL);
+            g_link_stats.keepalive_count = keepalive_count;
+            g_link_stats.dst_count = dtable_count_reachable();
+            if (now - last_stats_write >= 30) {
+                output_write_linkstats();
+                last_stats_write = now;
+            }
+        }
+
         uint8_t pid = 0;
         uint8_t buf[2048];
 
@@ -354,17 +365,6 @@ static int run_native_ce_session(int fd)
                         "sending our routes");
                 send_own_routes(fd);
                 sent_routes = 1;
-            }
-
-            /* Update link stats snapshot */
-            g_link_stats.keepalive_count = keepalive_count;
-            g_link_stats.dst_count = dtable_count_reachable();
-
-            /* Write linkstats every 30s */
-            time_t now = time(NULL);
-            if (now - last_stats_write >= 30) {
-                output_write_linkstats();
-                last_stats_write = now;
             }
 
             t_start = time(NULL);
