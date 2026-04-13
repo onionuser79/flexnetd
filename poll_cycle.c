@@ -347,23 +347,20 @@ static int run_native_ce_session(int fd)
          *
          * In socket mode (server) the full CE payload arrives as
          * 30 3E 25 21 0D — first byte is 0x30 ('0'), NOT 0x3E.
-         * Parse the peer's upper SSID and send our own init response
-         * with byte 0 = 0x30 (correct init marker). */
+         *
+         * Do NOT send an init response here — in server mode the parent
+         * already sent our init via ce_build_link_setup() before forking.
+         * Sending a second init confuses xnet (resets the link state).
+         * Only the pipe-mode handler sends init response (no parent). */
         if (buf[0] == '0') {
             int upper_ssid = 0;
             int r = ce_parse_frame(buf, len, NULL, &upper_ssid, NULL);
             if (r == CE_FRAME_INIT) {
                 LOG_INF("run_native_ce_session: init handshake "
-                        "peer_upper_ssid=%d", upper_ssid);
+                        "peer_upper_ssid=%d (no reply — server already sent)",
+                        upper_ssid);
                 got_peer_init = 1;
                 got_setup     = 1;  /* enables route advert trigger */
-
-                /* Reply with our own init (byte0=0x30 always) */
-                int ir = ce_send_init_response(fd);
-                if (ir < 0)
-                    LOG_WRN("run_native_ce_session: init response failed");
-                else
-                    LOG_INF("run_native_ce_session: init response sent");
             }
             t_start = time(NULL);
             continue;
