@@ -82,27 +82,53 @@ int ce_build_keepalive(uint8_t *buf, int buflen)
 }
 
 /*
- * ce_build_record — build one compact routing record (legacy '3' prefix).
- * Format: '3' CALLSIGN SSID [?]RTT '\r'
+ * ce_build_record — build one compact routing record.
+ *
+ * Wire format (confirmed from live captures + xnet ARM binary):
+ *   '3' + CALLSIGN(6 chars, space-padded) + SSID_LO(1 char) + SSID_HI(1 char)
+ *       + ['?'] + RTT(decimal digits) + ' ' + '\r'
+ *
+ * SSID encoding: char = 0x30 + ssid_value (0-15)
+ *   '0'-'9' = SSID 0-9, ':' = 10, ';' = 11, '<' = 12,
+ *   '=' = 13, '>' = 14, '?' = 15
+ *
  * Returns bytes written, -1 on error.
  */
 int ce_build_record(uint8_t *buf, int buflen,
-                    const char *callsign, int ssid, int rtt, int indirect)
+                    const char *callsign, int ssid_lo, int ssid_hi,
+                    int rtt, int indirect)
 {
+    /* clamp SSID values to valid range */
+    if (ssid_lo < 0)  ssid_lo = 0;
+    if (ssid_lo > 15) ssid_lo = 15;
+    if (ssid_hi < 0)  ssid_hi = 0;
+    if (ssid_hi > 15) ssid_hi = 15;
+
     char tmp[64];
     int  len;
 
     if (indirect)
-        len = snprintf(tmp, sizeof(tmp), "3%s%02d?%d\r", callsign, ssid, rtt);
+        len = snprintf(tmp, sizeof(tmp), "3%-6.6s%c%c?%d \r",
+                       callsign,
+                       (char)(0x30 + ssid_lo),
+                       (char)(0x30 + ssid_hi),
+                       rtt);
     else
-        len = snprintf(tmp, sizeof(tmp), "3%s%02d%d\r",  callsign, ssid, rtt);
+        len = snprintf(tmp, sizeof(tmp), "3%-6.6s%c%c%d \r",
+                       callsign,
+                       (char)(0x30 + ssid_lo),
+                       (char)(0x30 + ssid_hi),
+                       rtt);
 
     if (len < 0 || len >= (int)sizeof(tmp) || len >= buflen) {
-        LOG_ERR("ce_build_record: overflow for %s-%d", callsign, ssid);
+        LOG_ERR("ce_build_record: overflow for %s %d-%d",
+                callsign, ssid_lo, ssid_hi);
         return -1;
     }
     memcpy(buf, tmp, (size_t)len);
-    LOG_DBG("ce_build_record: '%.*s'", len - 1, tmp);
+    LOG_DBG("ce_build_record: '%.*s' (ssid %d-%d, encoded 0x%02X 0x%02X)",
+            len - 1, tmp, ssid_lo, ssid_hi,
+            0x30 + ssid_lo, 0x30 + ssid_hi);
     return len;
 }
 

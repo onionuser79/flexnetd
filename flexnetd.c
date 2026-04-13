@@ -50,12 +50,13 @@ static void daemonise(void)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s [-c config] [-d] [-f] [-v[vv]] [-V]\n"
-        "  -c file  config file (default: %s)\n"
-        "  -d       daemon mode (syslog)\n"
-        "  -f       foreground, stderr\n"
-        "  -v       verbose; repeat for more (-vvv = DEBUG)\n"
-        "  -V       print version and exit\n",
+        "Usage: %s [-c config] [-d] [-f] [-l logfile] [-v[vv]] [-V]\n"
+        "  -c file     config file (default: %s)\n"
+        "  -d          daemon mode (syslog)\n"
+        "  -f          foreground, stderr\n"
+        "  -l logfile  also log to file (console + file for debug)\n"
+        "  -v          verbose; repeat for more (-vvv = DEBUG)\n"
+        "  -V          print version and exit\n",
         prog, g_config_file);
 }
 
@@ -305,12 +306,14 @@ int main(int argc, char *argv[])
     int run_as_daemon    = 0;
     int force_foreground = 0;
     int verbosity_bump   = 0;
+    const char *log_file_path = NULL;
 
-    while ((opt = getopt(argc, argv, "c:dfvV")) != -1) {
+    while ((opt = getopt(argc, argv, "c:dfl:vV")) != -1) {
         switch (opt) {
         case 'c': g_config_file  = optarg; break;
         case 'd': run_as_daemon  = 1; force_foreground = 0; break;
         case 'f': run_as_daemon  = 0; force_foreground = 1; break;
+        case 'l': log_file_path  = optarg; break;
         case 'v': verbosity_bump++; break;
         case 'V': printf("flexnetd v%s\n", FLEXNETD_VERSION); return 0;
         default:  usage(argv[0]); return 1;
@@ -336,9 +339,20 @@ int main(int argc, char *argv[])
     if (g_use_syslog)
         openlog("flexnetd", LOG_PID | LOG_CONS, LOG_DAEMON);
 
-    LOG_INF("flexnetd v%s starting  (log=%d  syslog=%s)",
+    /* Open log file for dual console+file debug output */
+    if (log_file_path) {
+        g_log_file = fopen(log_file_path, "a");
+        if (!g_log_file) {
+            fprintf(stderr, "flexnetd: cannot open log file '%s': %s\n",
+                    log_file_path, strerror(errno));
+            return 1;
+        }
+    }
+
+    LOG_INF("flexnetd v%s starting  (log=%d  syslog=%s  logfile=%s)",
             FLEXNETD_VERSION, g_log_level,
-            g_use_syslog ? "yes" : "no");
+            g_use_syslog ? "yes" : "no",
+            log_file_path ? log_file_path : "none");
     config_dump(&g_cfg);
 
     if (strcmp(g_cfg.mycall,   "NOCALL-3")  == 0 ||
@@ -362,6 +376,7 @@ int main(int argc, char *argv[])
 
     int ret = (g_cfg.role == 1) ? run_server() : run_client();
 
+    if (g_log_file) { fclose(g_log_file); g_log_file = NULL; }
     if (g_use_syslog) closelog();
     return (ret == 0) ? 0 : 1;
 }

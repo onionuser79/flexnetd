@@ -22,7 +22,16 @@
  *   "L3RTT:%11lu%11lu%11lu%11lu %-6.6s LEVEL3_V2.1 (X)NET<ver> $M<max_dest> $N\r"
  *
  * Four %11lu fields: counter1..counter4 (RTT timing counters).
- * $M = max destination count (not an RTT value).
+ *   Probe:  c1=sender_tick, c2=0,  c3=0,         c4=0
+ *   Reply:  c1=sender_tick, c2=0,  c3=recv_tick,  c4=send_tick
+ *
+ * val1/val2 semantics (c3/c4 in reply, confirmed from Phase 3 captures):
+ *   c3=0, c4=0    when link is down ($M=60000 or no routes)
+ *   c3>0, c4>0    when link is active (peer uses these for RTT calc)
+ * Setting non-zero c3/c4 while the link is effectively down will mislead
+ * the peer's Q/T convergence.
+ *
+ * $M = reachable destination count (not an RTT value).
  *
  * Returns bytes written, -1 on error.
  */

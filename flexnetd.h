@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.3.0"
+#define FLEXNETD_VERSION        "0.4.0"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -72,8 +72,9 @@
 #define LOG_LEVEL_INFO          3
 #define LOG_LEVEL_DEBUG         4
 
-extern int g_log_level;
-extern int g_use_syslog;
+extern int   g_log_level;
+extern int   g_use_syslog;
+extern FILE *g_log_file;
 
 /* ── Logging macros ───────────────────────────────────────────────────── */
 #define FLOG_ERR(fmt, ...)  flexnetd_log(LOG_LEVEL_ERROR, "ERROR", fmt, ##__VA_ARGS__)
@@ -137,8 +138,7 @@ typedef struct {
 extern DestTable g_table;
 
 /* ── Function declarations ───────────────────────────────────────────── */
-
-void flexnetd_log(int level, const char *tag, const char *fmt, ...);
+/* flexnetd_log declared above with __attribute__((format)) */
 
 int  config_load(const char *path, FlexConfig *cfg);
 void config_dump(const FlexConfig *cfg);
@@ -178,7 +178,8 @@ uint32_t get_uptime_ticks(void);
 int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid);
 int ce_build_keepalive(uint8_t *buf, int buflen);
 int ce_build_record(uint8_t *buf, int buflen,
-                    const char *callsign, int ssid, int rtt, int indirect);
+                    const char *callsign, int ssid_lo, int ssid_hi,
+                    int rtt, int indirect);
 int ce_build_link_time(uint8_t *buf, int buflen, long link_time_ms);
 int ce_build_token(uint8_t *buf, int buflen, int token_val, char flag);
 int ce_build_dest_broadcast(uint8_t *buf, int buflen,
