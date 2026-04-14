@@ -1,6 +1,6 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.3.0** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.4.1** | Author: IW2OHX | License: GPL v3 | April 2026
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -572,6 +572,40 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.4.1 (2026-04-14)
+
+**M3 — Link health display:**
+- New `LinkStats` struct tracks Q/T, RTT, tx/rx bytes, connect time
+- `/usr/local/var/lib/ax25/flex/linkstats` updated every 30s in xnet L-table format
+- Q/T = 1 for direct link, RTT measured from link-time round-trip
+- New `LinkStatsFile` config option
+
+**M4.1 — VIA field in destinations:**
+- Destinations file shows actual VIA callsign instead of `00000`
+- `dtable_merge()` preserves `via_callsign` on route updates
+
+**M4.2/M4.3 — flexdest destination query tool:**
+- New standalone `flexdest` binary for D command with pattern matching
+- Supports exact match, prefix wildcard (`IW*`), SSID-specific (`IR5S-7`)
+- No libax25 dependency, reads destinations file directly
+
+**Protocol discovery — FlexNet L3 connections:**
+- Live multi-hop captures confirmed FlexNet L3 routing uses AX.25
+  digipeater chains, NOT CREQ/CACK framing
+- User identity preserved as L2 source through via-list digipeating
+- Standard SABM/UA/DISC with intermediate nodes in via field
+
+### v0.4.0 (2026-04-13)
+
+**M1 — Protocol completeness:**
+- CE SSID encoding for SSID >= 10: single-char `0x30+N` (`':'`=10 through `'?'`=15)
+- Init frame byte 0 fix: always `0x30`, no double-init in server mode
+- L3RTT c3/c4 set to 0 when link is down (no routes), non-zero when active
+
+**Debug logging:**
+- New `-l <logfile>` CLI option for dual console + file output
+- Usage: `flexnetd_debug -f -vvv -l /tmp/flexnetd.log`
 
 ### v0.3.0 (2026-04-11)
 
