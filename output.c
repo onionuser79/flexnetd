@@ -47,14 +47,13 @@ int output_write_gateways(void)
     }
 
     /* flexd gateways format: addr callsign dev [digipeaters...]
-     * Include our callsign as digipeater so URONode builds the
-     * via-list with our node visible as the originating digi:
-     *   fm IW7BIA-15 to IR5S via IW2OHX-3 IW2OHX-14
-     * Without this, outbound connects only show the neighbor
-     * in the path and our node is invisible to the network. */
+     *
+     * NOTE: URONode does not use the digipeater field from this file
+     * for building via-lists. Identity preservation (our callsign in
+     * the via-list) must be handled via kernel AX.25 routing instead.
+     * See M2 in ROADMAP.md. */
     fprintf(f, "addr  callsign  dev  digipeaters\n");
-    fprintf(f, "%05d %s %s %s\n",
-            0, g_cfg.neighbor, dev, g_cfg.flex_listen_call);
+    fprintf(f, "%05d %s %s\n", 0, g_cfg.neighbor, dev);
 
     fclose(f);
 
