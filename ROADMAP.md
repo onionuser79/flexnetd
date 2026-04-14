@@ -74,65 +74,94 @@ found, build a type-7 reply: `7$ <seq> <originator> <our_call> [<hops>] <dest>`.
 
 ---
 
-## Milestone M2 — Identity preservation  `v0.5.0`
+## Milestone M2 — Identity preservation (AX.25 digipeating)  `v0.5.0`
 
 FlexNet preserves the originating user's callsign end-to-end via AX.25
 digipeater semantics — the user's callsign is the L2 source throughout,
 with intermediate nodes appearing in the `via` field marked `*`.
 
 This is architecturally distinct from NET/ROM, which rewrites the L2
-source at each hop. Implementing it correctly is the core user-facing
-feature of a FlexNet node.
+source at each hop.
 
-### M2.1 — CREQ forwarding with originator  `flexnetd.c`
+### CONFIRMED: FlexNet L3 connections = AX.25 digipeater chains
 
-When a user connects to a FlexNet destination via flexnetd, build and
-send a CREQ frame:
-
-```
-L3 fm <mycall> to <dest_node> LT <lt> CREQ IN=<in> ID=<id> Window=4 <user_callsign> <mycall>
-```
-
-Fields confirmed from live capture: `Window=4` always, `ID` is constant
-for the session lifetime, `originator` is the user's callsign, `forwarding`
-is the local node callsign.
-
-### M2.2 — AX.25 digipeater via-field construction  `ax25sock.c`
-
-The SABM frame for a user session must carry the full via list. For a
-2-hop path `user → flexnetd → IR3UHU-2 → IR5S`, the SABM is:
+**Live captures (2026-04-14)** of multi-hop connections from IW7BIA at
+IW2OHX-12 (PCFlexnet) to IR5S and IR3UGM (behind IR3UHU-2) confirmed
+that xnet implements FlexNet L3 routing as AX.25 digipeating:
 
 ```
-fm user to IR5S via flexnetd* IR3UHU-2 ctl SABM+
+→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-14* IR3UHU-2 ctl SABM+
+← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl UA-
+← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl I00^ pid F0 [256]
+  ... data exchange (PID=F0, standard text) ...
+← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl DISC+
+→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-14* IR3UHU-2 ctl UA-
 ```
 
-This requires constructing an AX.25 frame with a via list. The `via_callsign`
-field already exists in `DestEntry` (populated by CE type-7 replies).
+**No CREQ/CACK/DREQ frames were observed.** The original ROADMAP M2.1
+(CREQ framing) and M2.3 (session state machine) are NOT needed.
 
-### M2.3 — Session state machine  `poll_cycle.c`
+Evidence captured on both sides:
+- Port 1 (IW2OHX-14 ↔ IW2OHX-12): `monitor_port1_raw.txt`
+- Port 11 (IW2OHX-14 ↔ IR3UHU-2): `monitor_port11_raw.txt`
 
-Add a session state machine for user connections:
+### Revised M2.1 — AX.25 digipeater support  `flexnetd.c` `ax25sock.c`
 
+When flexnetd's callsign (IW2OHX-3) appears in a via list, it must
+act as an AX.25 digipeater:
+
+1. Receive SABM with our callsign in the via list (unmarked)
+2. Mark our callsign with `*` (digipeated flag)
+3. Forward to the next callsign in the via list
+
+Example: when IW2OHX-3 is in the path between IW2OHX-12 and IW2OHX-14:
 ```
-IDLE → CONNECTING (CREQ sent) → CONNECTED (CACK received) → DISCONNECTING (DREQ) → IDLE
+→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-3 IW2OHX-14 ctl SABM+
+  (we receive this, mark ourselves, forward:)
+→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-3* IW2OHX-14 ctl SABM+
 ```
 
-Handle inbound CACK (which comes from the final destination node, not
-the intermediate neighbor), and DREQ/DACK at session teardown.
+**Option A:** Enable kernel AX.25 digipeating (`ax25_rt` or `digi`).
+The Linux kernel may already support this natively — investigate
+`/proc/sys/net/ax25/*/digi` and `ax25_rt -a` for cross-port digipeating.
 
-### M2.4 — Multi-hop path resolution  `dtable.c`
+**Option B:** Handle in flexnetd by intercepting frames with our
+callsign in the via list, forwarding to the appropriate port.
 
-For destinations more than 1 hop away: issue a CE type-6 query to
-discover the full path, build the AX.25 via list from the type-7 reply.
-The `via_callsign` field in `DestEntry` already stores the next-hop
-from earlier CE type-7 parsing.
+### Revised M2.2 — Via-list construction for outbound connects  `ax25sock.c`
+
+When a local user (connected to URONode) wants to connect to a FlexNet
+destination, build the SABM with the full digipeater via list from the
+routing table:
+
+```c
+/* Extend ax25_connect() to accept via list */
+int ax25_connect_via(const char *mycall, const char *dest,
+                     const char *port_name,
+                     const char **via_list, int via_count);
+```
+
+The via list is built from `DestEntry.via_callsign` (next-hop) in the
+routing table. For multi-hop paths, chain the next-hops.
+
+### M2.3 — Path resolution from routing table  `dtable.c`
+
+Build the full via list for a destination by walking the routing table:
+1. Look up destination → get `via_callsign` (next-hop neighbor)
+2. The path is: `our_callsign, neighbor_callsign` for 1-hop
+3. For multi-hop: recursively resolve each next-hop
+
+All routes currently arrive through IW2OHX-14, so the via list is
+always `[IW2OHX-3, IW2OHX-14]` for xnet-side destinations. Multi-
+neighbor support would add `[IW2OHX-3, IW2OHX-12]` for pcf-side.
 
 ---
 
-## Milestone M3 — Link health display  `v0.6.0`
+## Milestone M3 — Link health display  `v0.4.1` ✅ IMPLEMENTED
 
-URONode should display FlexNet link health in the same format as the
-xnet `L` command, giving operators a familiar view of link quality.
+URONode displays FlexNet link health in xnet `L` command format.
+Implemented in v0.4.1: LinkStats struct, periodic file output,
+Q/T=1 (direct link), RTT from link-time round-trip measurement.
 
 ### Target output format (matches xnet L table exactly)
 
@@ -189,32 +218,19 @@ Dest     SSID    RTT Gateway
 IR5S     0-15      4 IW2OHX-14
 ```
 
-### M4.2 — D command with pattern matching  `flexnetd.c`
+### M4.2/M4.3 — D command with pattern matching  `flexdest.c` ✅ IMPLEMENTED
 
-Handle `D <pattern>` queries where pattern may be:
-- Exact callsign: `D IR5S`
-- Prefix wildcard: `D IW*`
-- SSID-specific: `D IR5S-7`
+Standalone `flexdest` tool reads the destinations file and supports:
+- Exact callsign: `flexdest IR5S`
+- Prefix wildcard: `flexdest IW*`
+- SSID-specific: `flexdest IR5S-7`
+- All destinations: `flexdest` (no args)
 
-Scan `g_table` for matches, return formatted result in the xnet D
-command style. Pipe response to the connecting user via PID=F0.
-
-### M4.3 — D command output format  `output.c`
-
-```
-FlexNet Destination IR5S:
-Dest     SSID    RTT Gateway
--------- ----- ----- -------
-IR5S     0-15      4 IW2OHX-14
-```
-
-For wildcard queries (`D IW*`), return all matching entries sorted by
-callsign, grouped by base callsign:
+Output matches xnet D command style:
 
 ```
 FlexNet Destinations matching IW*:
-Dest     SSID    RTT Gateway
--------- ----- ----- -------
+Dest     SSID    RTT Via
 IW2OHX   3-3      1 (local)
 IW7BIA   0-15     4 IW2OHX-14
 IW8PGT   0-9      6 IW2OHX-14
@@ -224,20 +240,23 @@ IW8PGT   0-9      6 IW2OHX-14
 
 ## Version summary
 
-| Version | Milestone | Key deliverable |
-|---------|-----------|-----------------|
-| v0.3.0  | current   | Basic CE/CF peering, route exchange, Q/T=1 |
-| v0.4.0  | M1        | Full protocol correctness (SSID, init, L3RTT, type-6/7) |
-| v0.5.0  | M2        | User session forwarding with identity preservation |
-| v0.6.0  | M3        | Link health display in xnet L-table format |
-| v0.7.0  | M4 partial| VIA field in destinations, D command |
-| v1.0.0  | M4 complete| Full D wildcard, production-ready release |
+| Version | Milestone | Status | Key deliverable |
+|---------|-----------|--------|-----------------|
+| v0.3.0  | baseline  | ✅ | Basic CE/CF peering, route exchange, Q/T=1 |
+| v0.4.0  | M1        | ✅ | Protocol correctness (SSID, init, L3RTT) + debug logging |
+| v0.4.1  | M3+M4.1   | ✅ | Link health display, VIA field, flexdest tool |
+| v0.5.0  | M2        | **planned** | AX.25 digipeater support for transit connections |
+| v1.0.0  | release   | **planned** | Production-ready with multi-neighbor support |
 
 ---
 
 ## Protocol reference
 
-All milestones are grounded in `PROTOCOL_SPEC.md` which documents the
-complete FlexNet CE/CF wire protocol as reverse-engineered from live
-captures between IW2OHX-14 (xnet) and IW2OHX-3 (flexnetd), April 2026.
-All items in `PROTOCOL_SPEC.md` are resolved — the spec is implementation-ready.
+**CE/CF routing protocol:** documented in `PROTOCOL_SPEC.md`, reverse-
+engineered from live captures between IW2OHX-14 (xnet) and IW2OHX-3
+(flexnetd), April 2026.
+
+**FlexNet L3 connection protocol:** confirmed via live multi-hop captures
+(2026-04-14) as AX.25 digipeater chains. See `monitor_port1_raw.txt` and
+`monitor_port11_raw.txt` in the investigation directory. No CREQ/CACK
+framing — standard SABM/UA/DISC with via lists.
