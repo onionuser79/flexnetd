@@ -47,13 +47,17 @@ int output_write_gateways(void)
     }
 
     /* flexd gateways format: addr callsign dev [digipeaters...]
+     * URONode's read_flex_gt() (procinfo.c:113) uses strtok to parse:
+     *   field 1: addr (int)
+     *   field 2: call (gateway callsign, max 9 chars)
+     *   field 3: dev  (interface name, max 4 chars)
+     *   field 4+: digipeaters (each max 9 chars)
      *
-     * NOTE: URONode does not use the digipeater field from this file
-     * for building via-lists. Identity preservation (our callsign in
-     * the via-list) must be handled via kernel AX.25 routing instead.
-     * See M2 in ROADMAP.md. */
+     * Include our callsign as digipeater so outbound FlexNet connects
+     * show our node in the via-list (identity preservation). */
     fprintf(f, "addr  callsign  dev  digipeaters\n");
-    fprintf(f, "%05d %s %s\n", 0, g_cfg.neighbor, dev);
+    fprintf(f, "%05d %s %s %s\n",
+            0, g_cfg.neighbor, dev, g_cfg.flex_listen_call);
 
     fclose(f);
 
