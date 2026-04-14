@@ -46,9 +46,15 @@ int output_write_gateways(void)
         return -1;
     }
 
-    /* Match flexd format: "%05d %-8s %4s %s\n" */
+    /* Match flexd format: "%05d %-8s %4s %s\n"
+     * Include our callsign as digipeater so URONode builds the
+     * via-list with our node visible as the originating digi:
+     *   fm IW7BIA-15 to IR5S via IW2OHX-3 IW2OHX-14
+     * Without this, outbound connects only show the neighbor
+     * in the path and our node is invisible to the network. */
     fprintf(f, "addr  callsign  dev  digipeaters\n");
-    fprintf(f, "%05d %-8s %4s\n", 0, g_cfg.neighbor, dev);
+    fprintf(f, "%05d %-8s %4s %s\n",
+            0, g_cfg.neighbor, dev, g_cfg.flex_listen_call);
 
     fclose(f);
 
@@ -58,8 +64,8 @@ int output_write_gateways(void)
         return -1;
     }
 
-    LOG_INF("output_write_gateways: written (gateway=%s port=%s)",
-            g_cfg.neighbor, g_cfg.port_name);
+    LOG_INF("output_write_gateways: written (gateway=%s port=%s digi=%s)",
+            g_cfg.neighbor, g_cfg.port_name, g_cfg.flex_listen_call);
     return 0;
 }
 
