@@ -48,18 +48,39 @@ Link health display, destination query, VIA field.
   - SSID-specific: `flexdest IR5S-7`
   - No libax25 dependency
 
+### v0.5.0 — M2: Identity preservation (2026-04-14)
+
+Outbound FlexNet connects preserve our node's identity in the via-list.
+
+- **M2.2 Outbound via-list:** URONode gateways file includes IW2OHX-3 as
+  digipeater. `flexnetd/output.c` writes `<neighbor> <dev> <our_call>`.
+  URONode `do_connect()` builds SABM: `fm USER to DEST via IW2OHX-3 IW2OHX-14`
+- **M2 H-bit fix (URONode patch):** `setsockopt(fd, SOL_AX25, AX25_IAMDIGI, &1)`
+  before `connect()`. Without this, the kernel clears all H bits on outbound
+  connections. With `AX25_IAMDIGI`, the kernel honors the H bit we set on
+  `fsa_digipeater[0]`, so IW2OHX-3 goes out as `IW2OHX-3*` (already-repeated).
+  This lets xnet (IW2OHX-14) see the frame as addressed to it.
+
+  **Confirmed live** (2026-04-14): IW7CFD connects from URONode to IR5S,
+  `U` command on IR5S shows: `IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3`
+
+  URONode changes in `gateway.c`:
+  - `#define AX25_IAMDIGI 12` fallback
+  - `setsockopt(fd, SOL_AX25, AX25_IAMDIGI, ...)` for FlexNet connects
+  - H bit `|= 0x80` on first digipeater (our callsign)
+  - Fixed UB in argv building (clean for-loop replacing k++ side-effect)
+
 ---
 
 ## What's remaining
 
-### v0.5.0 — M2: Transit connections (identity preservation)
+### v0.6.0 — M2.1: Inbound transit (digipeater support)
 
-**Goal:** When a user connects THROUGH our node to a destination beyond
-us, preserve their callsign end-to-end.
+**Goal:** When a remote user connects THROUGH our node to a destination
+beyond us, forward the connection (act as AX.25 digipeater).
 
-**Key discovery (2026-04-14):** Live multi-hop captures confirmed that
-FlexNet L3 connections use **AX.25 digipeater chains**, NOT CREQ/CACK
-framing. This dramatically simplifies M2.
+**Key discovery (2026-04-14):** FlexNet L3 connections use **AX.25
+digipeater chains**, NOT CREQ/CACK framing.
 
 Captured evidence (IW7BIA from IW2OHX-12 → IR5S via IR3UHU-2):
 ```
@@ -67,29 +88,43 @@ Captured evidence (IW7BIA from IW2OHX-12 → IR5S via IR3UHU-2):
 ← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl UA-
 ```
 
-User identity (IW7BIA) preserved as L2 source. Intermediate nodes in
-via list with `*` = digipeated. Standard SABM/UA/DISC. No special framing.
+**What's needed:**
+
+| Task | Description | Complexity |
+|------|-------------|------------|
+| **M2.1 Digipeater support** | When IW2OHX-3 appears in an inbound via list, mark ourselves as digipeated and forward to next hop. Option A: kernel AX.25 digipeating (`/proc/sys/net/ax25/ax1/digi`). Option B: handle in flexnetd. | Medium |
+
+**First step:** Test kernel digipeating:
+```bash
+echo 1 > /proc/sys/net/ax25/ax1/digi
+# Then test inbound transit from xnet through us
+```
+
+### v0.7.0 — M5: Route path display
+
+**Goal:** Show the hop-by-hop route path for FlexNet destinations, like
+xnet's route trace output:
+```
+d iw2ohx-3     (on IR3UHF)
+*** route: IR3UHF IZ3LSV-14 IR3UHU-2 IW2OHX-14 IW2OHX-3
+```
+
+**What we have today:** Each `DestEntry` carries `via_callsign` — the
+next hop from xnet's perspective. This gives us a partial path:
+`IW2OHX-3 → IW2OHX-14 → [via] → destination`.
 
 **What's needed:**
 
 | Task | Description | Complexity |
 |------|-------------|------------|
-| **M2.1 Digipeater support** | When IW2OHX-3 appears in a via list, mark ourselves as digipeated and forward to next hop. Option A: kernel AX.25 digipeating. Option B: handle in flexnetd. | Medium |
-| **M2.2 Outbound via-list** | When a local URONode user does `c ir5s`, build SABM with via list from routing table (`ax25_connect_via()`). | Medium |
-| **M2.3 Path resolution** | Walk `DestEntry.via_callsign` to build full digipeater chain for any destination. | Low |
-
-**First step:** Investigate Linux kernel digipeating support:
-```bash
-cat /proc/sys/net/ax25/ax1/digi
-ax25_rt -l
-```
-If the kernel handles cross-port digipeating natively, M2.1 might be
-zero code — just configuration.
+| **M5.1 Partial route** | Show known path in `flexdest` and URONode D output: `route: IW2OHX-3 IW2OHX-14 [via_callsign] DEST` | Low |
+| **M5.2 Path chaining** | Recursively resolve via_callsign through the destinations table to extend the path where possible | Low |
+| **M5.3 CE type-6/7 path query** | Parse xnet's type-6/7 CE frames for full path info (if xnet sends path vectors in routing updates) | Medium |
 
 ### v1.0.0 — Production release
 
 - Multi-neighbor support (xnet port + pcf port)
-- M1.4 CE type-6/7 path query response (if needed)
+- Full route path display (M5.3 if needed)
 - Production hardening, documentation
 
 ---
@@ -118,7 +153,9 @@ confirmed wire protocol.
 | v0.3.0 | Basic CE/CF peering, route exchange, Q/T=1 | **Released** |
 | v0.4.0 | Protocol correctness (SSID, init, L3RTT) + debug logging | **Released** |
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
-| v0.5.0 | AX.25 digipeater support for transit connections | Planned |
+| v0.5.0 | Outbound identity preservation (H-bit + AX25_IAMDIGI) | **Released** |
+| v0.6.0 | Inbound transit digipeating | Planned |
+| v0.7.0 | Route path display (like xnet's `*** route:` output) | Planned |
 | v1.0.0 | Multi-neighbor, production hardening | Planned |
 
 ---

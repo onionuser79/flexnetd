@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.4.0"
+#define FLEXNETD_VERSION        "0.5.0"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
