@@ -1,6 +1,6 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.4.1** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.5.0** | Author: IW2OHX | License: GPL v3 | April 2026
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -427,7 +427,64 @@ CALLSIGN  RTT/SSID_MAX  PORT[TYPE] 'ALIAS'
 | SSID_ENCODE_BASE | 0x30 | SSID character encoding offset |
 | MAX_SSID | 15 | Maximum AX.25 SSID value |
 
-### 6.5 Link Establishment Sequence
+### 6.5 FlexNet L3 Connections (AX.25 Digipeater Chains)
+
+**Key discovery (2026-04-14):** FlexNet L3 connections do NOT use
+CREQ/CACK session framing. Instead, they are standard AX.25 connections
+with digipeater chains in the via-list. The user's callsign is preserved
+end-to-end as the L2 source address.
+
+Live capture evidence (IW7BIA connecting from IW2OHX-12 to IR5S):
+```
+→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-14* IR3UHU-2 ctl SABM+
+← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl UA-
+→ data frames (normal AX.25 I-frames with PID=F0)
+→ fm IW7BIA to IR5S via ... ctl DISC+
+← fm IR5S to IW7BIA via ... ctl UA-
+```
+
+The `*` marks indicate the AX.25 H bit (has-been-repeated, bit 7 of
+`ax25_call[6]`). Each intermediate node marks its entry and forwards
+the frame to the next unrepeated digi in the list.
+
+#### Identity Preservation from URONode (outbound)
+
+When a URONode user connects to a FlexNet destination, the gateways
+file includes our callsign as the first digipeater. URONode builds:
+```
+fm IW7CFD-15 to IR5S via IW2OHX-3 IW2OHX-14 ctl SABM+
+```
+
+**Critical: AX25_IAMDIGI is required.** The Linux kernel's
+`ax25_connect()` only honors H bits from userspace if the socket has
+`AX25_IAMDIGI` set. Without it, the kernel clears all `repeated[]`
+flags regardless of what the application puts in `fsa_digipeater`:
+
+```c
+/* net/ax25/af_ax25.c — ax25_connect() */
+if ((fsa->fsa_digipeater[ct].ax25_call[6] & AX25_HBIT) && ax25->iamdigi)
+    digi->repeated[ct] = 1;    /* H bit honored */
+else
+    digi->repeated[ct] = 0;    /* H bit CLEARED */
+```
+
+The URONode patch sets both flags before `connect()`:
+```c
+setsockopt(fd, SOL_AX25, AX25_IAMDIGI, &1, sizeof(1));
+sa.ax.fsa_digipeater[0].ax25_call[6] |= 0x80;
+```
+
+This produces the correct wire format:
+```
+fm IW7CFD-15 to IR5S via IW2OHX-3* IW2OHX-14 ctl SABM+
+```
+
+The destination's `U` command confirms identity preservation:
+```
+IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3
+```
+
+### 6.6 Link Establishment Sequence
 
 ```
          flexnetd (IW2OHX-3)                xnet (IW2OHX-14)
@@ -514,28 +571,31 @@ Default: `/usr/local/var/lib/ax25/flex/gateways`
 
 ```
 addr  callsign  dev  digipeaters
-00000 IW2OHX-14  ax1
+00000 IW2OHX-14 ax1 IW2OHX-3
 ```
 
 Format matches the original flexd output. The `dev` field is the **kernel
-interface name** (e.g., `ax1`), not the axports port name. URONode uses
-this field to create AX.25 sockets for outbound FlexNet connections.
+interface name** (e.g., `ax1`), not the axports port name. The optional
+`digipeaters` field lists our callsign so outbound FlexNet connects include
+it in the AX.25 via-list for identity preservation (see §6.6). URONode uses
+the `dev` field to create AX.25 sockets for outbound connections.
 
 ### Destinations File
 
 Default: `/usr/local/var/lib/ax25/flex/destinations`
 
 ```
-callsign  ssid     rtt  gateway
-DB0AAT    0-9        7    00000
-DK0WUE    0-13       2    00000
-IW2OHX    3-3        1    00000
+Dest     SSID    RTT Via
+DB0AAT    0-9        7 IR3UHU-2
+DK0WUE    0-13       2 IW2OHX-14
+IW2OHX    3-3        1 IW2OHX-14
 ...
 ```
 
 Updated atomically (write to `.tmp`, then `rename()`) every 60 seconds
 during active CE sessions. Entries with RTT >= Infinity (60000) are
-filtered out.
+filtered out. The VIA field shows the next-hop callsign from the CE
+routing data (falls back to the configured neighbor if not specified).
 
 ---
 
@@ -572,6 +632,22 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.5.0 (2026-04-14)
+
+**M2 — Identity preservation (outbound FlexNet connects):**
+- Gateways file now includes our callsign as digipeater:
+  `00000 IW2OHX-14 ax1 IW2OHX-3`
+- URONode builds outbound SABM with our callsign in the AX.25 via-list
+- **AX25_IAMDIGI kernel fix**: `setsockopt(fd, SOL_AX25, AX25_IAMDIGI, &1)`
+  required before `connect()` — without this, the kernel clears all H bits
+  on outbound connections regardless of what userspace sets
+- H bit (`|= 0x80`) set on our digi entry so it goes out as `IW2OHX-3*`
+  (already-repeated), enabling the neighbor to process the next digi
+- Fixed undefined behavior in URONode `gateway.c` argv building
+  (`k++` side-effect in array indexing replaced with clean for-loop)
+- **Confirmed live**: IW7CFD connects from URONode to IR5S, `U` command
+  on IR5S shows: `IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3`
 
 ### v0.4.1 (2026-04-14)
 
