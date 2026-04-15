@@ -1,0 +1,100 @@
+From 951cc9eff79c17ad50d230e89f76d907092ab544 Mon Sep 17 00:00:00 2001
+From: Marco Di Martino <marco.dimartino@delinea.com>
+Date: Tue, 14 Apr 2026 22:55:31 +0200
+Subject: [PATCH] M2: FlexNet identity preservation via AX25_IAMDIGI + H-bit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When URONode connects to a FlexNet destination, the gateways file
+includes our callsign as the first digipeater in the via-list.
+The Linux kernel only honors H bits from userspace on connect() if
+the socket has AX25_IAMDIGI set — without it, ax25_connect() clears
+all repeated[] flags regardless of fsa_digipeater contents.
+
+Changes:
+- Add AX25_IAMDIGI (12) fallback define for older libax25 headers
+- setsockopt(SOL_AX25, AX25_IAMDIGI) before connect() for AF_FLEXNET
+- Set H bit (0x80) on first digipeater (our callsign, already-repeated)
+- Fix UB in argv building: replace k++ side-effect with clean for-loop
+
+Wire result: fm USER to DEST via IW2OHX-3* IW2OHX-14 ctl SABM+
+Confirmed: IR5S U output shows IW2OHX-3 in the via-path.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ gateway.c | 37 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/gateway.c b/gateway.c
+index 7b2dd3b..657d143 100644
+--- a/gateway.c
++++ b/gateway.c
+@@ -28,6 +28,12 @@
+ #include "procinfo.h"
+ #include "node.h"
+ 
++/* AX25_IAMDIGI: tells kernel to honor H bits from userspace in connect().
++ * Defined in <linux/ax25.h> but may be missing from older libax25 headers. */
++#ifndef AX25_IAMDIGI
++#define AX25_IAMDIGI 12
++#endif
++
+ static void invert_ssid(char *out, char *in)
+ {
+   char *cp;
+@@ -242,6 +248,25 @@ static ax25io *connect_to(char **addr, int family, int escape, int compr)
+       close(fd);
+       return NULL;
+     }
++    /* For FlexNet outbound connects, our callsign is the first digi
++     * in the via-list (originating node). Mark it as already-repeated
++     * (H bit = 0x80) so downstream nodes process the next digi.
++     * Without this, the frame goes out with our digi unmarked and
++     * the neighbor ignores it (not its callsign to digi).
++     *
++     * IMPORTANT: The kernel only honors H bits from userspace if the
++     * socket has AX25_IAMDIGI set.  Without it, ax25_connect() clears
++     * all repeated[] flags regardless of what we put in fsa_digipeater.
++     * See net/ax25/af_ax25.c — the check is:
++     *   if ((fsa->fsa_digipeater[ct].ax25_call[6] & AX25_HBIT)
++     *       && ax25->iamdigi)  →  repeated[ct] = 1
++     */
++    if (family == AF_FLEXNET && sa.ax.fsa_ax25.sax25_ndigis > 0) {
++      int digi_flag = 1;
++      setsockopt(fd, SOL_AX25, AX25_IAMDIGI,
++                 &digi_flag, sizeof(digi_flag));
++      sa.ax.fsa_digipeater[0].ax25_call[6] |= 0x80;
++    }
+     strcpy(User.dl_name, strupr(addr[1]));
+     strcpy(User.dl_port, strlwr(addr[0]));
+     sa.ax.fsa_ax25.sax25_family = AF_AX25;
+@@ -621,7 +646,15 @@ int do_connect(int argc, char **argv)
+       flgt=find_gateway(flx->addr, NULL);
+       argv[k++]=ax25_config_get_name(flgt->dev);
+       argv[k++]=call;
+-      while((k-3)<AX25_MAX_DIGIS&&flgt->digis[k-3][0]!='\0') argv[k]=flgt->digis[(k++)-3];
++      /* Add digipeaters from gateways file before the gateway call.
++       * Avoid UB: don't use k++ inside argv[k] in the same expr. */
++      {
++        int d;
++        for (d=0; d<AX25_MAX_DIGIS && flgt->digis[d][0]!='\0'; d++) {
++          argv[k] = flgt->digis[d];
++          k++;
++        }
++      }
+       argv[k++]=flgt->call;
+       argv[k]=NULL;
+       argc=k;
+@@ -634,7 +667,7 @@ int do_connect(int argc, char **argv)
+     else if ((ax=find_route(argv[1], NULL))!=NULL) {  /* Check AX25 Links */
+       k=1;
+ 
+-      switch(*ax->conn_type)  { 
++      switch(*ax->conn_type)  {
+       case CONN_TYPE_DIRECT:
+ 	{
+ 	  argv[k++]=ax->dev;
+-- 
+2.53.0.windows.1
+
