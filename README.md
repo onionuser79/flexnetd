@@ -183,7 +183,7 @@ This installs:
 ### Patch URONode (required for outbound FlexNet connects)
 
 flexnetd writes a gateways file that URONode reads for FlexNet routing.
-For outbound connections to work with identity preservation, URONode
+For outbound connections to work with digipeater path preservation, URONode
 needs a small patch to `gateway.c` that sets the `AX25_IAMDIGI` socket
 option and the AX.25 H bit on the digipeater via-list.
 
@@ -468,7 +468,7 @@ The `*` marks indicate the AX.25 H bit (has-been-repeated, bit 7 of
 `ax25_call[6]`). Each intermediate node marks its entry and forwards
 the frame to the next unrepeated digi in the list.
 
-#### Identity Preservation from URONode (outbound)
+#### Digipeater Path Preservation from URONode (outbound)
 
 When a URONode user connects to a FlexNet destination, the gateways
 file includes our callsign as the first digipeater. URONode builds:
@@ -500,7 +500,7 @@ This produces the correct wire format:
 fm IW7CFD-15 to IR5S via IW2OHX-3* IW2OHX-14 ctl SABM+
 ```
 
-The destination's `U` command confirms identity preservation:
+The destination's `U` command confirms our node in the digipeater path:
 ```
 IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3
 ```
@@ -598,7 +598,7 @@ addr  callsign  dev  digipeaters
 Format matches the original flexd output. The `dev` field is the **kernel
 interface name** (e.g., `ax1`), not the axports port name. The optional
 `digipeaters` field lists our callsign so outbound FlexNet connects include
-it in the AX.25 via-list for identity preservation (see §6.6). URONode uses
+it in the AX.25 via-list for digipeater path preservation (see §6.5). URONode uses
 the `dev` field to create AX.25 sockets for outbound connections.
 
 ### Destinations File
@@ -656,7 +656,7 @@ flexnetd was developed using a capture-driven approach:
 
 ### v0.5.0 (2026-04-14)
 
-**M2 — Identity preservation (outbound FlexNet connects):**
+**M2 — Digipeater path preservation (outbound FlexNet connects):**
 - Gateways file now includes our callsign as digipeater:
   `00000 IW2OHX-14 ax1 IW2OHX-3`
 - URONode builds outbound SABM with our callsign in the AX.25 via-list

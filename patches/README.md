@@ -1,7 +1,7 @@
 # URONode Patches for FlexNet Support
 
 These patches are applied to [URONode](https://github.com/Online-Amateur-Radio-Club-M0OUK/uronode)
-to enable FlexNet identity preservation when connecting to FlexNet destinations.
+to enable digipeater path preservation when connecting to FlexNet destinations.
 
 ## uronode-m2-identity-preservation.patch
 

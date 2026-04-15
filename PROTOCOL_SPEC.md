@@ -84,7 +84,7 @@
   IACK: L3 fm <src> to <dst> LT <lt> IACK IN=<in> ID=<id> S(<seq>) R(<ack>)
 
 
-### Identity preservation — CONFIRMED (Phase 4)
+### Digipeater path preservation — CONFIRMED (Phase 4)
 
   FlexNet preserves the originating user callsign using AX.25 DIGIPEATER
   SEMANTICS -- NOT by rewriting L3 fields as NET/ROM does.
