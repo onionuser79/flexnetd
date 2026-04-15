@@ -1,7 +1,7 @@
 # FlexNet / (X)Net Protocol — Reverse Engineering Findings
 # Based on live captures from IW2OHX-14 <-> IR3UHU-2 and IW2OHX-14 <-> IW2OHX-13
-# Initial: 2026-04-10 | Phase 1/2: 2026-04-13 | Phase 3: 2026-04-13 | Phase 4: 2026-04-13
-# Author: IW2OHX + Claude Sonnet 4.6
+# Initial: 2026-04-10 | Phase 1/2: 2026-04-13 | Phase 3: 2026-04-13 | Phase 4: 2026-04-13 | M2: 2026-04-14
+# Author: IW2OHX + Claude Sonnet 4.6 + Claude Opus 4.6
 # Verified against: DCC1995 paper (DK7WJ/N2IRZ), xnet138.pdf, RMNC_FlexNet.html
 # Status: ALL INVESTIGATION ITEMS RESOLVED
 # =======================================================================
@@ -100,8 +100,35 @@
     IW2OHX to IR5S via DB0FHN* IW2OHX-14* IR3UHU-2  ctl SABM+
     IR5S to IW2OHX via IR3UHU-2* IW2OHX-14 DB0FHN   ctl UA-
 
+  Example (outbound from URONode — IW7CFD connects to IR5S via IW2OHX-3):
+    IW7CFD-15 to IR5S via IW2OHX-3* IW2OHX-14  ctl SABM+
+    Destination U output: IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3
+
   The CREQ L3 payload also carries the originator explicitly:
     CREQ payload: <originating_callsign> <forwarding_node>
+
+
+### Linux AX.25 kernel: AX25_IAMDIGI requirement — CONFIRMED (2026-04-14)
+
+  When originating an outbound SABM with digipeaters, the Linux kernel's
+  ax25_connect() only honors H bits from userspace if the socket has
+  AX25_IAMDIGI set. Without it, all repeated[] flags are cleared:
+
+    /* net/ax25/af_ax25.c — ax25_connect() */
+    if ((fsa->fsa_digipeater[ct].ax25_call[6] & AX25_HBIT) && ax25->iamdigi)
+        digi->repeated[ct] = 1;    /* H bit honored */
+    else
+        digi->repeated[ct] = 0;    /* H bit CLEARED */
+
+  Required socket setup before connect():
+    int val = 1;
+    setsockopt(fd, SOL_AX25, AX25_IAMDIGI, &val, sizeof(val));  /* value 12 */
+    sa.ax.fsa_digipeater[0].ax25_call[6] |= 0x80;               /* H bit */
+
+  Without AX25_IAMDIGI, SABM goes out with no H bits set, and the neighbor
+  drops the frame (unrepeated digi doesn't match its callsign).
+
+  AX25_IAMDIGI = 12 (from <linux/ax25.h>, may be missing from older libax25)
 
 ---
 
