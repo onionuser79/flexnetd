@@ -180,6 +180,27 @@ This installs:
 - `/usr/local/sbin/flexnetd` (binary)
 - `/usr/local/etc/ax25/flexnetd.conf` (config, if not already present)
 
+### Patch URONode (required for outbound FlexNet connects)
+
+flexnetd writes a gateways file that URONode reads for FlexNet routing.
+For outbound connections to work with identity preservation, URONode
+needs a small patch to `gateway.c` that sets the `AX25_IAMDIGI` socket
+option and the AX.25 H bit on the digipeater via-list.
+
+Without this patch, outbound FlexNet connects from URONode will fail
+(the SABM frame goes out without the H bit, and the FlexNet neighbor
+drops it).
+
+```bash
+cd /path/to/uronode-source/
+git apply /path/to/flexnetd/patches/uronode-m2-identity-preservation.patch
+make clean && make
+sudo make install
+```
+
+See [`patches/README.md`](patches/README.md) for full details on what
+the patch does and why it's needed.
+
 ### Deploy
 
 Add to your AX.25 startup script (`/etc/init.d/ax25`), **after** the
