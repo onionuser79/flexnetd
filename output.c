@@ -54,7 +54,7 @@ int output_write_gateways(void)
      *   field 4+: digipeaters (each max 9 chars)
      *
      * Include our callsign as digipeater so outbound FlexNet connects
-     * show our node in the via-list (identity preservation). */
+     * show our node in the via-list (digipeater path preservation). */
     fprintf(f, "addr  callsign  dev  digipeaters\n");
     fprintf(f, "%05d %s %s %s\n",
             0, g_cfg.neighbor, dev, g_cfg.flex_listen_call);

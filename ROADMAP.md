@@ -48,9 +48,9 @@ Link health display, destination query, VIA field.
   - SSID-specific: `flexdest IR5S-7`
   - No libax25 dependency
 
-### v0.5.0 — M2: Identity preservation (2026-04-14)
+### v0.5.0 — M2: Digipeater path preservation (2026-04-14)
 
-Outbound FlexNet connects preserve our node's identity in the via-list.
+Outbound FlexNet connects include our node in the AX.25 digipeater via-list.
 
 - **M2.2 Outbound via-list:** URONode gateways file includes IW2OHX-3 as
   digipeater. `flexnetd/output.c` writes `<neighbor> <dev> <our_call>`.
@@ -153,7 +153,7 @@ confirmed wire protocol.
 | v0.3.0 | Basic CE/CF peering, route exchange, Q/T=1 | **Released** |
 | v0.4.0 | Protocol correctness (SSID, init, L3RTT) + debug logging | **Released** |
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
-| v0.5.0 | Outbound identity preservation (H-bit + AX25_IAMDIGI) | **Released** |
+| v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
 | v0.6.0 | Inbound transit digipeating | Planned |
 | v0.7.0 | Route path display (like xnet's `*** route:` output) | Planned |
 | v1.0.0 | Multi-neighbor, production hardening | Planned |
