@@ -3,7 +3,7 @@
 These patches are applied to [URONode](https://github.com/Online-Amateur-Radio-Club-M0OUK/uronode)
 to enable digipeater path preservation when connecting to FlexNet destinations.
 
-## uronode-m2-identity-preservation.patch
+## uronode-m2-digipeater-path.patch
 
 **File:** `gateway.c`
 **Applies to:** URONode master (tested against commit `e0c14b4`)
@@ -77,7 +77,7 @@ IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3
 
 ```bash
 cd /path/to/uronode-source/
-git apply /path/to/uronode-m2-identity-preservation.patch
+git apply /path/to/uronode-m2-digipeater-path.patch
 make clean && make
 sudo make install
 ```
@@ -85,7 +85,7 @@ sudo make install
 Or manually with `patch`:
 ```bash
 cd /path/to/uronode-source/
-patch -p1 < /path/to/uronode-m2-identity-preservation.patch
+patch -p1 < /path/to/uronode-m2-digipeater-path.patch
 ```
 
 ### Prerequisites

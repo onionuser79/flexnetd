@@ -193,7 +193,7 @@ drops it).
 
 ```bash
 cd /path/to/uronode-source/
-git apply /path/to/flexnetd/patches/uronode-m2-identity-preservation.patch
+git apply /path/to/flexnetd/patches/uronode-m2-digipeater-path.patch
 make clean && make
 sudo make install
 ```
