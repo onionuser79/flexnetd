@@ -74,33 +74,7 @@ Outbound FlexNet connects include our node in the AX.25 digipeater via-list.
 
 ## What's remaining
 
-### v0.6.0 — M2.1: Inbound transit (digipeater support)
-
-**Goal:** When a remote user connects THROUGH our node to a destination
-beyond us, forward the connection (act as AX.25 digipeater).
-
-**Key discovery (2026-04-14):** FlexNet L3 connections use **AX.25
-digipeater chains**, NOT CREQ/CACK framing.
-
-Captured evidence (IW7BIA from IW2OHX-12 → IR5S via IR3UHU-2):
-```
-→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-14* IR3UHU-2 ctl SABM+
-← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl UA-
-```
-
-**What's needed:**
-
-| Task | Description | Complexity |
-|------|-------------|------------|
-| **M2.1 Digipeater support** | When IW2OHX-3 appears in an inbound via list, mark ourselves as digipeated and forward to next hop. Option A: kernel AX.25 digipeating (`/proc/sys/net/ax25/ax1/digi`). Option B: handle in flexnetd. | Medium |
-
-**First step:** Test kernel digipeating:
-```bash
-echo 1 > /proc/sys/net/ax25/ax1/digi
-# Then test inbound transit from xnet through us
-```
-
-### v0.7.0 — M5: Route path display
+### v0.6.0 — M5: Route path display (NEXT)
 
 **Goal:** Show the hop-by-hop route path for FlexNet destinations, like
 xnet's route trace output:
@@ -121,10 +95,68 @@ next hop from xnet's perspective. This gives us a partial path:
 | **M5.2 Path chaining** | Recursively resolve via_callsign through the destinations table to extend the path where possible | Low |
 | **M5.3 CE type-6/7 path query** | Parse xnet's type-6/7 CE frames for full path info (if xnet sends path vectors in routing updates) | Medium |
 
+### v0.7.0 — M6: Multi-neighbor support (prerequisite for M2.1)
+
+**Goal:** Peer with more than one FlexNet neighbor simultaneously.
+Currently flexnetd has a single `Neighbor` in config — all CE/CF state,
+dtable merging, and user dispatch assume one peer.
+
+**Motivation:** Today IW2OHX-3 only peers with IW2OHX-14 (xnet). If we
+add a second port to peer with IW2OHX-12 (PCFlexnet), we gain:
+- Redundancy if one path fails
+- Direct access to PCFlexnet destinations
+- **Unlocks M2.1** — cross-port transit becomes meaningful when there
+  are two ports to forward between
+
+**What's needed:**
+
+| Task | Description | Complexity |
+|------|-------------|------------|
+| **M6.1 Config: multiple neighbors** | Parse N `Neighbor` entries with their PortName, FlexListenCall, SSID range | Low |
+| **M6.2 Per-neighbor CE state** | One `LinkStats` + CE session context per neighbor (array or list) | Medium |
+| **M6.3 Per-neighbor dtable merge** | Track origin neighbor on each `DestEntry`; merge preferring lowest RTT | Medium |
+| **M6.4 Accept dispatch** | Match accepted peer against any of N neighbors, route to correct handler | Low |
+| **M6.5 Output files** | Gateways file with multiple rows; destinations file with correct VIA per neighbor | Low |
+
+### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
+
+**Status:** Blocked — makes sense only with 2+ FlexNet ports.
+
+**Goal:** When a remote user connects THROUGH our node to a destination
+beyond us, forward the connection (act as AX.25 digipeater between
+ports).
+
+**Key discovery (2026-04-14):** FlexNet L3 connections use **AX.25
+digipeater chains**, NOT CREQ/CACK framing.
+
+Captured evidence (IW7BIA from IW2OHX-12 → IR5S via IR3UHU-2):
+```
+→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-14* IR3UHU-2 ctl SABM+
+← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl UA-
+```
+
+Note: in our current single-port setup, the chain does NOT include
+IW2OHX-3 — the FlexNet network routes directly to IW2OHX-14 without
+using us as an intermediate. This is why M2.1 is blocked on M6
+(multi-port): only then does IW2OHX-3 appear as a cross-port bridge.
+
+**What's needed (when M6 is done):**
+
+| Task | Description | Complexity |
+|------|-------------|------------|
+| **M2.1 Digipeater support** | When our callsign appears in an inbound via list, mark ourselves as digipeated and forward to next hop on the other port. Option A: kernel AX.25 digipeating (`/proc/sys/net/ax25/<iface>/digi`). Option B: application-level digi in flexnetd (for cross-port cases the kernel may not handle). | Medium |
+
+**First test (when reached):**
+```bash
+echo 1 > /proc/sys/net/ax25/ax1/digi
+echo 1 > /proc/sys/net/ax25/ax2/digi
+# Try transit from one port through us to the other
+```
+
 ### v1.0.0 — Production release
 
-- Multi-neighbor support (xnet port + pcf port)
 - Full route path display (M5.3 if needed)
+- M2.1 transit fully tested across ports
 - Production hardening, documentation
 
 ---
@@ -154,9 +186,10 @@ confirmed wire protocol.
 | v0.4.0 | Protocol correctness (SSID, init, L3RTT) + debug logging | **Released** |
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
 | v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
-| v0.6.0 | Inbound transit digipeating | Planned |
-| v0.7.0 | Route path display (like xnet's `*** route:` output) | Planned |
-| v1.0.0 | Multi-neighbor, production hardening | Planned |
+| v0.6.0 | M5 — Route path display (like xnet's `*** route:` output) | **Next** |
+| v0.7.0 | M6 — Multi-neighbor support (xnet + PCFlexnet ports) | Planned |
+| v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
+| v1.0.0 | Production hardening + full docs | Planned |
 
 ---
 
