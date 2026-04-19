@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.6.0"
+#define FLEXNETD_VERSION        "0.7.0-dev"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -53,6 +53,7 @@
 #define MAX_PATH_LEN            256
 #define MAX_DEST_ENTRIES        2000
 #define MAX_SSID                15
+#define MAX_PORTS               4   /* M6: up to 4 FlexNet ports */
 
 /* ── CE frame parse return codes ─────────────────────────────────────── */
 #define CE_FRAME_KEEPALIVE      1   /* '2' + 240 pad chars = 241 bytes   */
@@ -108,14 +109,44 @@ void flexnetd_log(int level, const char *tag, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
 /* ── Configuration ───────────────────────────────────────────────────── */
+
+/*
+ * M6: per-port configuration.  Each entry describes one AX.25 port on
+ * which flexnetd binds its listen callsign, connects out to a FlexNet
+ * neighbor, and accepts inbound sessions.
+ *
+ * All ports share the node identity (MyCall, Alias) but each port has
+ * its own bind/listen callsign and neighbor.  The listen callsign is
+ * typically the same across ports (e.g. IW2OHX-3 everywhere) — this is
+ * supported by the kernel when each socket uses SO_BINDTODEVICE.
+ */
+typedef struct {
+    char    name[MAX_IFACE_LEN];               /* axports port name (e.g. "xnet") */
+    char    listen_call[MAX_CALLSIGN_LEN];     /* callsign bound on this port */
+    char    neighbor[MAX_CALLSIGN_LEN];        /* expected FlexNet peer on this port */
+    int     min_ssid;                          /* SSID range announced to peer */
+    int     max_ssid;
+} PortCfg;
+
 typedef struct {
     char    mycall[MAX_CALLSIGN_LEN];
     char    alias[MAX_ALIAS_LEN];
-    int     min_ssid;
+    int     min_ssid;                          /* global default — used if PortCfg.min_ssid is 0 */
     int     max_ssid;
+
+    /* M6 multi-port: array + count.  If no 'Port' blocks appear in the
+     * config, legacy keywords (Neighbor/PortName/FlexListenCall) are
+     * synthesised into ports[0] for backward compatibility. */
+    PortCfg ports[MAX_PORTS];
+    int     num_ports;
+
+    /* Legacy single-port fields — still populated for back-compat and
+     * mirror ports[0] after config_load() completes.  New code should
+     * prefer the ports[] array. */
     char    neighbor[MAX_CALLSIGN_LEN];
-    char    port_name[MAX_IFACE_LEN];           /* axports port name */
-    char    flex_listen_call[MAX_CALLSIGN_LEN]; /* e.g. "IW2OHX-9", NOT in ax25d.conf */
+    char    port_name[MAX_IFACE_LEN];
+    char    flex_listen_call[MAX_CALLSIGN_LEN];
+
     int     role;                               /* 0=client (D-cmd), 1=server (native) */
     int     poll_interval;
     int     keepalive_interval;

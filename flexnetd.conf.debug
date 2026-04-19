@@ -22,12 +22,13 @@ Alias           OHXGW
 MinSSID         3
 MaxSSID         3
 
-Neighbor        IW2OHX-14
-PortName        xnet
-
-FlexListenCall  IW2OHX-3
-
 Role            server
+
+# ── FlexNet ports (M6 multi-port syntax demo) ────────────────────────
+# Single-port debug setup; add more Port lines to exercise M6.
+Port xnet  IW2OHX-14  IW2OHX-3
+# Uncomment for a second FlexNet peering (when available):
+# Port pcf   IW2OHX-12  IW2OHX-3
 
 PollInterval    240
 KeepaliveInterval  90

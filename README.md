@@ -243,13 +243,21 @@ Alias           OHXGW           # 6-char node alias
 MinSSID         3               # SSID range lower bound
 MaxSSID         3               # SSID range upper bound
 
-# Neighbor
+Role            server          # 'server' (native CE/CF) or 'client' (D-cmd)
+
+# FlexNet ports — two equivalent syntaxes:
+#
+# 1) Legacy single-port (v0.3.0..v0.6.0):
 Neighbor        IW2OHX-14       # FlexNet peer callsign
 PortName        xnet            # axports port name
-
-# Server binding
-FlexListenCall  IW2OHX-3        # Callsign to bind (must match axports)
-Role            server          # 'server' (native CE/CF) or 'client' (D-cmd)
+FlexListenCall  IW2OHX-3        # Callsign to bind on this port
+#
+# 2) Multi-port (v0.7.0+, M6) — up to 4 Port entries, same listen
+#    callsign shared across ports is supported (the kernel allows it
+#    because each socket uses SO_BINDTODEVICE):
+#
+# Port xnet  IW2OHX-14  IW2OHX-3
+# Port pcf   IW2OHX-12  IW2OHX-3
 
 # Timers
 PollInterval    240             # Client mode: seconds between D-cmd polls
