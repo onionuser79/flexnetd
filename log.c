@@ -16,6 +16,7 @@
 int   g_log_level  = LOG_LEVEL_INFO;
 int   g_use_syslog = 0;
 FILE *g_log_file   = NULL;
+int   g_port_idx   = -1;   /* M6.6: set by parent before CE fork */
 
 /*
  * write_timestamped — write a timestamped log line to a FILE stream.

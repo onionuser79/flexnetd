@@ -210,6 +210,12 @@ static int run_server(void)
                  * free for more connections while the CE session runs. */
                 LOG_INF("flexnetd: FlexNet session (pid=0x%02X) from %s on %s",
                         first_pid, peer_call, pc->name);
+                /* M6.6: tag this CE child with its port index so it writes
+                 * a port-specific linkstats row and merges the unified
+                 * output correctly.  Set BEFORE fork() so the child
+                 * inherits it; reset in the parent so later non-CE forks
+                 * (uronode users) don't carry a stale value. */
+                g_port_idx = i;
                 pid_t ce_child = fork();
                 if (ce_child < 0) {
                     LOG_ERR("flexnetd: fork(CE): %s", strerror(errno));
@@ -235,6 +241,9 @@ static int run_server(void)
                 } else {
                     /* Parent: close conn_fd, CE child owns it */
                     close(conn_fd);
+                    /* Clear CE port tag — subsequent uronode forks must
+                     * not inherit it. */
+                    g_port_idx = -1;
                     LOG_INF("flexnetd: CE session pid=%d for session #%d",
                             (int)ce_child, session_count);
                 }
