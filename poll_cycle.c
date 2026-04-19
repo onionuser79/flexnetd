@@ -273,7 +273,21 @@ static int run_native_ce_session(int fd)
     int     probe_idx        = 0;   /* round-robin dtable index         */
     time_t  last_keepalive_tx = time(NULL);   /* proactive keepalive timer */
     time_t  last_routes_tx   = 0;      /* M6.7: last time we sent 3+/route/3- */
-    time_t  last_lt_tx       = 0;      /* M6.9: last time we sent a link-time frame */
+    /*
+     * M6.9.1: seed last_lt_tx to (now - interval) so that the FIRST
+     * link-time send (typically during the init handshake reply to
+     * the peer's initial '1' frame) passes the rate-limit gate, but
+     * any SUBSEQUENT send within the same interval window is blocked.
+     *
+     * Without this seed, peer-side init sequences that bounce 2-3 '1'
+     * frames back to back all got through (last_lt_tx=0 produced
+     * "now - 0 = huge >> interval" for every call in the first second).
+     * Those rapid-fire replies were exactly what caused the 4095
+     * sample we still see pinning the avg high post-convergence.
+     */
+    time_t  last_lt_tx       = (g_cfg.lt_reply_interval > 0)
+                                ? time(NULL) - g_cfg.lt_reply_interval
+                                : 0;
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
