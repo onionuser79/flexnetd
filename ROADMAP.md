@@ -91,9 +91,11 @@ next hop from xnet's perspective. This gives us a partial path:
 
 | Task | Description | Complexity |
 |------|-------------|------------|
-| **M5.1 Partial route** | Show known path in `flexdest` and URONode D output: `route: IW2OHX-3 IW2OHX-14 [via_callsign] DEST` | Low |
-| **M5.2 Path chaining** | Recursively resolve via_callsign through the destinations table to extend the path where possible | Low |
-| **M5.3 CE type-6/7 path query** | Parse xnet's type-6/7 CE frames for full path info (if xnet sends path vectors in routing updates) | Medium |
+| **M5.1 Partial route** | Show known path from local data: `route: <me> <neighbor> [via_callsign] DEST` | Low |
+| **M5.2 Path chaining** | (Dropped — each `via_callsign` is an independent next-hop and does not chain) | — |
+| **M5.3 CE type-6/7 path query** | Send type-6 REQUEST, collect type-7 REPLY with accumulated hop list. Wire format fully decoded. | Medium |
+
+Type-6/7 wire format is documented in `PROTOCOL_SPEC.md` §CE type-6/7.
 
 ### v0.7.0 — M6: Multi-neighbor support (prerequisite for M2.1)
 

@@ -80,7 +80,7 @@ int dtable_merge(const DestEntry *incoming)
 /*
  * dtable_load_from_text — parse D-command response and merge all entries.
  *
- * The Xnet D command outputs entries as whitespace-separated triplets:
+ * The D command outputs entries as whitespace-separated triplets:
  *   CALLSIGN  LO-HI  RTT   CALLSIGN  LO-HI  RTT  ...
  * Multiple entries per line, \r\n terminated. No port/type/alias fields.
  *

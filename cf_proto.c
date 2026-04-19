@@ -2,7 +2,6 @@
  * cf_proto.c — PID=CF NET/ROM-compatible FlexNet protocol
  *
  * Handles L3RTT probe/reply and D-table destination record parsing.
- * Wire format fully confirmed from val_probe_capture.json (April 2026).
  */
 
 #include <stdio.h>
@@ -12,20 +11,20 @@
 #include <time.h>
 #include "flexnetd.h"
 
-/* Fixed hardware serial observed from IW2OHX-14 captures */
+/* Fixed hardware serial used on this node */
 #define NODE_SERIAL  "3076541136"
 
 /*
  * cf_build_l3rtt — build an L3RTT probe/reply payload.
  *
- * Wire format from xnet ARM binary (fdest.c):
- *   "L3RTT:%11lu%11lu%11lu%11lu %-6.6s LEVEL3_V2.1 (X)NET<ver> $M<max_dest> $N\r"
+ * Wire format:
+ *   "L3RTT:%11lu%11lu%11lu%11lu %-6.6s LEVEL3_V2.1 <ver> $M<max_dest> $N\r"
  *
  * Four %11lu fields: counter1..counter4 (RTT timing counters).
  *   Probe:  c1=sender_tick, c2=0,  c3=0,         c4=0
  *   Reply:  c1=sender_tick, c2=0,  c3=recv_tick,  c4=send_tick
  *
- * val1/val2 semantics (c3/c4 in reply, confirmed from Phase 3 captures):
+ * val1/val2 semantics (c3/c4 in reply):
  *   c3=0, c4=0    when link is down ($M=60000 or no routes)
  *   c3>0, c4>0    when link is active (peer uses these for RTT calc)
  * Setting non-zero c3/c4 while the link is effectively down will mislead

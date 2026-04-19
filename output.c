@@ -8,7 +8,7 @@
  *
  * Writes atomically via temp file + rename().
  *
- * NOTE: The 'dev' field in gateways is the axports port name (e.g. "xnet"),
+ * NOTE: The 'dev' field in gateways is the axports port name,
  * NOT the kernel interface name (ax1). URONode uses it for display only.
  */
 
@@ -28,7 +28,7 @@ int output_write_gateways(void)
 
     LOG_INF("output_write_gateways: writing to %s", g_cfg.gateways_file);
 
-    /* Resolve axports name → kernel interface (e.g. "xnet" → "ax1").
+    /* Resolve axports name → kernel interface.
      * URONode uses the dev field to open an AX.25 socket — it must be
      * the kernel interface name, not the axports port name.  The old
      * flexd used ax25_config_get_dev() which does the same thing. */
@@ -124,9 +124,9 @@ int output_write_destinations(void)
     return 0;
 }
 
-/* ── Link stats output (xnet L-table format) ────────────────────────── */
+/* ── Link stats output (L-table format) ─────────────────────────────── */
 
-/* Format duration as "Xh YYm" or "Xm YYs" like xnet */
+/* Format duration as "Xh YYm" or "Xm YYs" */
 static void fmt_duration(long secs, char *buf, int buflen)
 {
     if (secs < 0) secs = 0;
@@ -138,7 +138,7 @@ static void fmt_duration(long secs, char *buf, int buflen)
         snprintf(buf, buflen, "%lds", secs);
 }
 
-/* Format byte count as "1.2K", "37K", "1.5M" like xnet */
+/* Format byte count as "1.2K", "37K", "1.5M" */
 static void fmt_bytes(long bytes, char *buf, int buflen)
 {
     if (bytes < 0) bytes = 0;
@@ -164,7 +164,7 @@ int output_write_linkstats(void)
         return -1;
     }
 
-    /* Header matching xnet L command */
+    /* Header matching the L command format */
     fprintf(f, "Link to       dst    Q/T    rtt    tx connect"
                "   tx   rx   txq/rxq  rr+%%  bit/s\n");
 

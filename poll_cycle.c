@@ -344,7 +344,7 @@ static int run_native_ce_session(int fd)
             g_link_stats.tx_bytes += CE_KEEPALIVE_LEN;
             g_link_stats.tx_frames++;
 
-            /* Send link time on every keepalive cycle so xnet can
+            /* Send link time on every keepalive cycle so the peer can
              * converge its smoothed RTT.  Without this, Q/T stays
              * frozen at 301 and rtt at 600/2 indefinitely. */
             {
@@ -362,8 +362,8 @@ static int run_native_ce_session(int fd)
             }
 
             /* After first keepalive exchange with peer, the link is
-             * stable — proactively advertise our routes.  Captures
-             * show xnet never sends '3+' (request token) so we must
+             * stable — proactively advertise our routes.  The peer
+             * does not send '3+' (request token) unprompted, so we
              * initiate the route advertisement ourselves. */
             if (!sent_routes && got_peer_init && got_setup) {
                 LOG_INF("run_native_ce_session: link stable — "
@@ -376,14 +376,14 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Init handshake: '0' prefix (FLXDECOD: "Initial Handshake")
+        /* Init handshake: '0' prefix ("Initial Handshake")
          *
          * In socket mode (server) the full CE payload arrives as
          * 30 3E 25 21 0D — first byte is 0x30 ('0'), NOT 0x3E.
          *
          * Do NOT send an init response here — in server mode the parent
          * already sent our init via ce_build_link_setup() before forking.
-         * Sending a second init confuses xnet (resets the link state).
+         * Sending a second init confuses the peer (resets the link state).
          * Only the pipe-mode handler sends init response (no parent). */
         if (buf[0] == '0') {
             int upper_ssid = 0;
@@ -410,7 +410,7 @@ static int run_native_ce_session(int fd)
 
                 /* Measure actual RTT: time since we sent our link-time
                  * until we received the peer's link-time response.
-                 * Convert to 100ms ticks to match xnet L-table format. */
+                 * Convert to 100ms ticks to match L-table format. */
                 if (lt_sent_pending) {
                     struct timespec now_ts;
                     clock_gettime(CLOCK_MONOTONIC, &now_ts);
@@ -433,7 +433,7 @@ static int run_native_ce_session(int fd)
                 g_link_stats.qt = 1;
 
                 /* Reply with our own link time EVERY time.
-                 * Xnet uses exponential smoothing — it needs repeated
+                 * The peer uses exponential smoothing — it needs repeated
                  * measurements to converge from the initial 600
                  * (RTT_INFINITY) toward the actual value. */
                 uint8_t lt_buf[32];
@@ -462,7 +462,7 @@ static int run_native_ce_session(int fd)
                 last_token = token_val;
                 LOG_INF("run_native_ce_session: token val=%d flag='%c'",
                         token_val, flag_buf[0]);
-                /* Echo token back (xnet may expect acknowledgement) */
+                /* Echo token back (the peer may expect acknowledgement) */
                 uint8_t tbuf[32];
                 int tlen = ce_build_token(tbuf, sizeof(tbuf),
                                           token_val, flag_buf[0]);

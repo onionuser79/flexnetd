@@ -287,7 +287,7 @@ The FlexNet protocol uses two AX.25 PID values over connected-mode
 fixed-width fields.
 
 Protocol behavior documented from live packet captures between
-flexnetd and (X)NET nodes.
+flexnetd and its neighbors.
 
 ### 6.1 PID Values
 
@@ -304,11 +304,12 @@ Each CE frame is classified by its first payload byte:
 | Byte | Type | Description |
 |------|------|-------------|
 | `'0'` (0x30) | Init Handshake | Link setup with SSID range |
-| `'1'` (0x31) | Link Time | Link delay measurement (100ms ticks) |
-| `'2'` (0x32) | Keepalive | Poll frame (241 bytes) |
+| `'1'` (0x31) | RTT-Pong / Link Time | Link delay measurement (100ms ticks) |
+| `'2'` (0x32) | RTT-Ping / Keepalive | Poll frame (241 bytes) |
 | `'3'` (0x33) | Routing Data | Token signals and compact routing records |
-| `'4'` (0x34) | Token | Token/sequence exchange |
-| `'6'` (0x36) | Dest Broadcast | Individual destination update |
+| `'4'` (0x34) | Destination filter | Send only / Resend all with RTT threshold |
+| `'6'` (0x36) | Route/Traceroute Request | Path query (see §6.2.6) |
+| `'7'` (0x37) | Route/Traceroute Reply | Path response with accumulated hops (see §6.2.6) |
 
 #### Init Handshake (type '0')
 
@@ -397,13 +398,77 @@ Token-based flow control for routing updates.
 '4' <decimal_value> <flag_char> '\r'
 ```
 
-#### Destination Broadcast (type '6')
+#### Route / Traceroute Request and Reply (type '6' / '7')  — §6.2.6
 
-Individual destination update for triggered/incremental routing.
+These two frames implement the `D <callsign>` (find path to destination)
+and `TRACE <callsign>` (hop-by-hop traceroute) commands across a FlexNet
+network.  A requesting node emits a **type-6 request**; the target node
+returns a **type-7 reply** that accumulates the hop-by-hop path as each
+forwarding node appends its callsign.
+
+Route and Traceroute share the same wire format — they are distinguished
+by a single bit in the QSO field (see below).
+
+##### Type-6 Request — wire format
 
 ```
-'6' ' ' <5-digit RTT> <callsign_info> ' ' <via_callsign> '\r'
+'6'  HOP_BYTE  QSO_FIELD(5 bytes)  ORIGIN_CALL  ' '  TARGET_CALL
 ```
+
+| Field | Size | Encoding |
+|-------|------|----------|
+| `'6'` | 1 byte | Frame type marker |
+| HOP_BYTE | 1 byte | `0x20 + hop_count` — initial sender emits `0x20` (count=0); each forwarder increments before re-emitting |
+| QSO_FIELD | 5 bytes | Query correlator, written as `sprintf("%5u", qso_id)` — space-padded right-aligned decimal |
+| ORIGIN_CALL | variable | Originator's callsign-SSID text (ASCII) |
+| `' '` | 1 byte | Separator |
+| TARGET_CALL | variable | Destination callsign-SSID text (ASCII) |
+
+**Example** (Route request, QSO=1, from IW2OHX-3 to IR5S, freshly sent):
+```
+"6     1IW2OHX-3 IR5S"
+hex: 36 20 20 20 20 20 31 49 57 32 4F 48 58 2D 33 20 49 52 35 53
+```
+
+##### Type-7 Reply — wire format
+
+```
+'7'  HOP_BYTE  QSO_FIELD(5 bytes)  ' '  HOP_1  ' '  HOP_2  ' '  ...  HOP_N
+```
+
+Each forwarding node on the return path appends `' ' + own_callsign`
+before relaying the frame, and increments HOP_BYTE.
+
+**Example** (captured reply, 4 hops accumulated, QSO=1):
+```
+"7$    1IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S"
+├─ '7'      = reply frame type
+├─ '$'      = HopCount byte; 0x24 - 0x20 = 4 hops
+├─ '    1'  = QSO number = 1 (matches the request)
+└─ 4 callsigns separated by ' '
+```
+
+##### Route vs Traceroute flag
+
+The **first byte** of the QSO_FIELD encodes the Route vs Traceroute
+selector in its bit `0x40`:
+
+| bit 0x40 | Meaning |
+|----------|---------|
+| 0 (clear) | **Route** — caller wants only the final path |
+| 1 (set) | **Traceroute** — each hop also reports its identity to the requester |
+
+Since `sprintf("%5u", n)` naturally produces either `' '` (0x20) or a
+decimal digit (`0x30`..`0x39`) in the first byte — all of which have
+bit `0x40` clear — an initial Route request carries bit `0x40 = 0`.
+To signal Traceroute, the sender replaces the first byte of QSO_FIELD
+with one that has bit `0x40 = 1` (for example `0x60`).
+
+##### QSO correlation
+
+The 5-byte QSO_FIELD is the **only correlator** between a request and
+its reply.  The originator MUST pick a value unique among its in-flight
+queries, e.g. a monotonically increasing counter modulo 100000.
 
 ### 6.3 CF Protocol (PID=0xCF)
 

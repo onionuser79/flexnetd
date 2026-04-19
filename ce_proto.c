@@ -1,18 +1,14 @@
 /*
  * ce_proto.c — PID=CE native FlexNet protocol
  *
- * Record types (confirmed from xnet ARM binary + PC/FlexNet32 DLL analysis):
+ * Record types:
  *   '0' — initial handshake (upper SSID announcement)
- *   '1' — link time in milliseconds
- *   '2' — keepalive null frame (241 bytes)
+ *   '1' — RTT-Pong / link time in milliseconds
+ *   '2' — RTT-Ping / keepalive null frame (241 bytes)
  *   '3' — status frames ('3+\r', '3-\r') and compact routing records
- *   '4' — token/sequence exchange (with flag char)
- *   '6' — destination broadcast record (RTT + callsign + via)
- *
- * Sources:
- *   flxnod32.dll  — format strings: '0%c  %c\r', '1%d\r', '4%d%c\r', '6 %5u%s %s'
- *   FLXDECOD.DLL  — decoder: "Initial Handshake", "RTT-Ping/Pong", "Router Data"
- *   xnet_arm7     — fdest.c: '2%240s', '1%ld', '4%u', '6 %c%4d%a %a'
+ *   '4' — destination filter (Send only / Resend all with RTT threshold)
+ *   '6' — Route/Traceroute REQUEST (path query)
+ *   '7' — Route/Traceroute REPLY (accumulated hop list)
  */
 
 #include <stdio.h>
@@ -31,7 +27,7 @@
  *   byte 4: 0x0D  (CR terminator)
  *
  * Example: MinSSID=0 MaxSSID=14 -> 30 3E 25 21 0D
- * Xnet decodes: "Link setup - max SSID 14"
+ * The peer decodes this as an initial handshake with upper SSID.
  */
 #define CE_LINK_SETUP_LEN  5
 
@@ -46,9 +42,8 @@ int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid)
     }
     /*
      * byte 0: always 0x30 — init handshake marker ('0' prefix).
-     *         MUST stay 0x30 or xnet misclassifies the frame.
+     *         MUST stay 0x30 or the peer misclassifies the frame.
      * byte 1: 0x30 + max_ssid — the upper SSID bound.
-     *         FLXDECOD.DLL: "Initial Handshake. Upper SSID: %d"
      * byte 2-3: 0x25 0x21 — capability flags.
      * byte 4: 0x0D — CR terminator.
      */
@@ -64,8 +59,7 @@ int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid)
 
 /* ── CE keepalive: '2' + 240 spaces = 241 bytes ─────────────────────── */
 /*
- * Wire format from xnet ARM binary (fdest.c): sprintf(buf, "2%240s", "")
- * Confirmed by live capture: xnet sends '2' followed by 240 space chars.
+ * Wire format: 241-byte frame = '2' followed by 240 space chars.
  * No trailing '10\r' — that is a separate CE status frame.
  */
 int ce_build_keepalive(uint8_t *buf, int buflen)
@@ -84,7 +78,7 @@ int ce_build_keepalive(uint8_t *buf, int buflen)
 /*
  * ce_build_record — build one compact routing record.
  *
- * Wire format (confirmed from live captures + xnet ARM binary):
+ * Wire format:
  *   '3' + CALLSIGN(6 chars, space-padded) + SSID_LO(1 char) + SSID_HI(1 char)
  *       + ['?'] + RTT(decimal digits) + ' ' + '\r'
  *
@@ -148,7 +142,7 @@ int ce_build_link_time(uint8_t *buf, int buflen, long link_time_ms)
 
 /* ── CE token: '4' + decimal_value + flag_char + '\r' ──────────────── */
 /*
- * Win32 PC/FlexNet format: '4%d%c\r'
+ * Wire format: '4' + decimal_value + flag_char + '\r'
  *   token_val = sequence number
  *   flag      = token handover flag character
  *               (space = normal, 'R' = request, etc.)
@@ -166,14 +160,14 @@ int ce_build_token(uint8_t *buf, int buflen, int token_val, char flag)
     return len;
 }
 
-/* ── CE destination broadcast: '6 ' + 5-digit RTT + callsign_info ─── */
+/* ── CE type-6 legacy builder (DEPRECATED) ─────────────────────────── */
 /*
- * Wire format from flxnod32.dll: '6 %5u%s %s'
- * Decoder display:  '%c%-6.6s%3d-%-2d%5d '
- *   flag_char + 6-char call + ssid_lo-ssid_hi + 5-digit RTT
- *
- * The '6 ' prefix starts the frame, then RTT (5 digits), then
- * destination callsign with SSID range, then via-callsign.
+ * NOTE: The correct semantics of type-6 is "Route/Traceroute REQUEST"
+ *       (first byte of payload = hop count + 0x20, followed by 5-digit
+ *       QSO number, originator callsign, space, target callsign).
+ *       This legacy builder treats the 5-digit field as RTT and the
+ *       callsigns as dest+via.  It is retained only for historical
+ *       reasons; M5.3 introduces the proper request/reply builders.
  */
 int ce_build_dest_broadcast(uint8_t *buf, int buflen,
                             int rtt, const char *callsign,
@@ -199,13 +193,11 @@ int ce_build_dest_broadcast(uint8_t *buf, int buflen,
 }
 
 /*
- * ce_parse_dest_broadcast — parse a CE type-6 destination broadcast record.
+ * ce_parse_dest_broadcast — legacy parser (DEPRECATED, see M5.3).
  *
- * Wire format (from flxnod32.dll + FLXDECOD.DLL):
- *   '6 ' + 5-digit RTT + callsign_with_ssid + ' ' + via_callsign + '\r'
- *
- * Decoder display format: '%c%-6.6s%3d-%-2d%5d '
- *   flag_char + 6-char call + ssid_lo - ssid_hi + 5-digit RTT
+ * Historically interpreted as a destination broadcast with RTT + dest + via.
+ * The actual type-6 semantics is a Route/Traceroute REQUEST; this parser is
+ * kept for backward compatibility with fields that happen to line up.
  *
  * Returns 0 on success, -1 on parse failure.
  */
@@ -336,9 +328,8 @@ int ce_parse_frame(const uint8_t *data, int len,
     }
 
     /* ── Init handshake: '0' prefix ────────────────────────────────── */
-    /* Format from PC/FlexNet: '0%c  %c\r'
-     * byte[1] = upper SSID encoded as 0x30+ssid
-     * Confirmed by FLXDECOD.DLL: "Initial Handshake. Upper SSID: %d" */
+    /* Format: '0%c  %c\r'
+     * byte[1] = upper SSID encoded as 0x30+ssid */
     if (data[0] == '0' && len >= 2) {
         int upper_ssid = (int)(data[1]) - 0x30;
         if (upper_ssid < 0)  upper_ssid = 0;
@@ -369,7 +360,7 @@ int ce_parse_frame(const uint8_t *data, int len,
     }
 
     /* ── Token: '4' + decimal + flag_char + '\r' ───────────────────── */
-    /* Format from PC/FlexNet: '4%d%c\r' */
+    /* Format: '4%d%c\r' */
     if (data[0] == '4' && len >= 3) {
         char vbuf[16] = {0};
         int vi = 0;

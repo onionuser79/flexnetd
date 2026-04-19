@@ -192,19 +192,72 @@
   Triggered at cycle boundaries (~240s), NOT on individual RTT changes.
 
 
-### CE type-6 — D command path query (Phase 4)
+### CE Frame Type Dispatch — REVISED (2026-04-19)
 
-  Multi-hop destinations only. Direct neighbors = local lookup, no frame sent.
-  Format: '6' <flags> '    ' <seq> <originator> ' ' <next-hop> ' ' <dest> '\r'
-  flags='!', length ~30 bytes.
+  Complete frame-type table, all CE frames dispatch by first ASCII byte
+  of the payload:
+
+    byte 0   | purpose
+    ---------|-------------------------------------------------------------
+    '0' (0x30)| Initial handshake (upper SSID announcement)
+    '1' (0x31)| RTT-Pong / link time in milliseconds
+    '2' (0x32)| RTT-Ping / keepalive null frame (241 bytes)
+    '3' (0x33)| Routing tokens ('3+', '3-') and compact routing records
+    '4' (0x34)| Destination filter (Send only / Resend all with RTT threshold)
+    '5' (0x35)| unused / default fallthrough
+    '6' (0x36)| Route REQUEST or Traceroute REQUEST  (see below)
+    '7' (0x37)| Route REPLY or Traceroute REPLY      (see below)
 
 
-### CE type-7 — D command path reply (Phase 4)
+### CE type-6 — Route / Traceroute REQUEST
 
-  Format: '7' <flags> '    ' <seq> <originator> ' ' <next-hop> [' ' <hop>...] ' ' <dest> '\r'
-  flags='$', length ~38+ bytes. Each hop appends itself.
-  Example: '7$    1IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S'
-  Path to IR5S: IW2OHX-14 -> IR3UHU-2 -> IQ5KG-7 -> IR5S
+  Wire format:
+    '6'  HOP_BYTE  QSO_FIELD(5 bytes)  ORIGIN_CALL  ' '  TARGET_CALL
+
+  HOP_BYTE = 0x20 + hop_count   (ASCII-offset counter)
+              initial sender emits 0x20 (HopCount = 0).
+              each forwarder increments before re-emitting.
+
+  QSO_FIELD = 5 bytes, written by initial sender as sprintf("%5u", qso_id).
+              right-aligned decimal with space padding ("    1", "12345").
+
+  Route vs Traceroute is signalled by bit 0x40 of the FIRST byte of
+  QSO_FIELD:
+    bit 0x40 clear  →  Route request
+    bit 0x40 set    →  Traceroute request
+  (the initial sprintf puts ' ' (0x20) or digits in that byte; to mark
+  Traceroute, the sender replaces that byte with one that has bit 0x40
+  set, for example 0x60.)
+
+  Example request (HopCount=0, QSO=1, IW2OHX-3 → IR5S):
+    '6 ' + '    1' + 'IW2OHX-3' + ' ' + 'IR5S' + '\r'
+    hex:  36 20 20 20 20 20 31 49 57 32 4F 48 58 2D 33 20 49 52 35 53 0D
+
+
+### CE type-7 — Route / Traceroute REPLY
+
+  Wire format (outbound from target, accumulates hops on return path):
+    '7'  HOP_BYTE  QSO_FIELD(5 bytes)  ' '  HOP_1  ' '  HOP_2  ...  HOP_N
+
+  HOP_BYTE = 0x20 + current hop count (grows as reply travels back).
+  QSO_FIELD = same value as in the matching request (correlator).
+  HOP_i    = callsign-with-SSID in printable form (e.g. "IW2OHX-14").
+
+  Captured example (HopCount=4, QSO=1, path IW2OHX-14 → IR3UHU-2 → IQ5KG-7 → IR5S):
+    '7$    1IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S'
+    ├─ '7'         = reply
+    ├─ '$' (0x24)  = HopCount byte, 0x24 - 0x20 = 4
+    ├─ '    1'     = QSO number = 1
+    └─ callsigns separated by single ' '
+
+  Route vs Traceroute: same bit 0x40 convention on the first byte of
+  QSO_FIELD as for the request.  A responder preserves the bit from the
+  request (Route request yields Route reply; Traceroute request yields
+  Traceroute reply).
+
+  Correlation: the QSO_FIELD byte sequence is the only correlator
+  between request and reply — the originator must pick a value unique
+  among its in-flight queries.
 
 ---
 
@@ -255,11 +308,12 @@
   CE init frame         : 5 bytes = 0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D
   CE link-time initial  : '1600\r' (600 ticks)
   CE SSID encoding      : ord(c) - 0x30 for c in '0'..'?' (0x30..0x3F)
-  CE type-6 query       : ~30 bytes, flags='!'
-  CE type-7 reply       : ~38+ bytes per hop, flags='$'
+  CE type-6 request     : '6' + HopCount byte + 5-char QSO + origin + ' ' + target
+  CE type-7 reply       : '7' + HopCount byte + 5-char QSO + ' ' + hop1 ' ' ... hopN
+  Traceroute selector   : bit 0x40 of first byte of QSO field (set = trace)
   CREQ Window           : always 4
   CREQ session ID       : ID field, constant for session lifetime
-  T3 default (Xnet)     : 180000ms
+  T3 default            : 180000ms
 
 ---
 
@@ -271,7 +325,10 @@
   #4  CE null frame: 0x32 + 237x 0x20 + '10\r'. CONFIRMED.
   #5  CE trigger: cycle-boundary token exchange. D_TABLE poison-reverse IS immediate. CONFIRMED.
   #6  CE SSID >=10: char substitution 0x30+N. 86 real-data examples confirmed. RESOLVED.
-  #8  D command: CE type-6/7 query-reply for multi-hop. Direct = local lookup only. DECODED.
+  #8  D command: CE type-6/7 request-reply for multi-hop paths. Format REVISED 2026-04-19:
+      frame = TYPE + HopCount_byte (0x20 + N) + 5-char QSO field + callsign(s).
+      Route vs Traceroute encoded in bit 0x40 of first byte of QSO field.
+      DECODED.
   #9  CREQ/CACK + identity: AX.25 digipeater semantics. L2 source = user callsign. DECODED.
       CREQ payload: <originator> <forwarding_node>. CACK from final destination.
 

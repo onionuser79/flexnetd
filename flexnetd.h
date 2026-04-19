@@ -97,7 +97,7 @@ typedef struct {
     int     min_ssid;
     int     max_ssid;
     char    neighbor[MAX_CALLSIGN_LEN];
-    char    port_name[MAX_IFACE_LEN];           /* axports port name e.g. "xnet" */
+    char    port_name[MAX_IFACE_LEN];           /* axports port name */
     char    flex_listen_call[MAX_CALLSIGN_LEN]; /* e.g. "IW2OHX-9", NOT in ax25d.conf */
     int     role;                               /* 0=client (D-cmd), 1=server (native) */
     int     poll_interval;
