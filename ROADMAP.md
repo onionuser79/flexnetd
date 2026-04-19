@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.4.1 (stable, in production)
+**Current version:** v0.7.0 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -146,11 +146,40 @@ destination is confirmed reachable — but it must not be read as
    The destination is confirmed reachable (but full hop list is
    not available from this peer).
 
-### v0.7.0 — M6: Multi-neighbor support (prerequisite for M2.1)
+### v0.7.0 — M6: Multi-neighbor support + PCFlexnet interop (2026-04-19, stable)
 
-**Goal:** Peer with more than one FlexNet neighbor simultaneously.
-Currently flexnetd has a single `Neighbor` in config — all CE/CF state,
-dtable merging, and user dispatch assume one peer.
+**Shipped.**  Peers with multiple FlexNet neighbors simultaneously
+and exchanges routes with PCFlexnet over AXUDP after a weeks-long
+reverse-engineering effort to decode `flxnod32.dll`'s state machine.
+
+**Key findings from the RE (documented in code comments at each fix):**
+- PCFlexnet's RTT clamp at `0xFFF` (4095) at `0x10006F64` saturates
+  when our reply arrives before `link.ts` (set to `now + 320s` after
+  each RTT update at `0x100062FF`).  Fixed by `LinkTimeReplyInterval`
+  (default 320 s).
+- PCFlexnet's `'+'` handler at `0x1000641B` accepts `'3+'` only when
+  `[ebx+0xF]` (token state) is 0.  Every other state triggers the
+  reject path at `0x100065A0` → L2 DM.  Fixed by never echoing `'3+'`
+  and by sending compact-record-only refreshes.
+- Token state can only be 0 immediately after handshake or after
+  specific transitions we cannot observe remotely — so we never
+  proactively initiate token exchanges with pcf; we only reply.
+- xnet's ARM implementation is more permissive and tolerates our
+  older behaviour; the fixes above don't regress xnet's peering.
+
+**Fine-tuning still open (moved to v0.7.1 planning):**
+- Occasional DM events when both ports are under simultaneous load —
+  need synchronised listen captures on `ax1` (xnet) and `ax2` (pcf)
+  to correlate L2 events across ports.
+- The `destinations` file doesn't surface pcf's routes as `Via
+  IW2OHX-12` even when pcf's advertised RTT is lower than xnet's —
+  probably a bug in `ce_parse_compact_records` / `dtable_merge`
+  around the per-neighbor `via_callsign` field.
+- The `RouteAdvertInterval` (60 s) and `LinkTimeReplyInterval` (320 s)
+  defaults work but aren't adaptive; a future M6.10 could read the
+  peer's reported smoothed and adjust interval.
+
+**Original scope (all delivered):**
 
 **Motivation:** Today IW2OHX-3 only peers with IW2OHX-14 (xnet). If we
 add a second port to peer with IW2OHX-12 (PCFlexnet), we gain:
@@ -273,7 +302,8 @@ confirmed wire protocol.
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
 | v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
 | v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
-| v0.7.0 | M6 — Multi-neighbor support (two FlexNet ports) | Planned |
+| v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop + RE of flxnod32.dll | **Stable** |
+| v0.7.1 | M6 fine-tuning — simultaneous-load stability, adaptive intervals, destinations-file via-field | Planned |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
