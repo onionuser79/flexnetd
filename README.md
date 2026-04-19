@@ -1,8 +1,8 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.6.0 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.7.0 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.6.0-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.6.0)
+[![stable](https://img.shields.io/badge/release-v0.7.0-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.0)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -769,6 +769,65 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.0 (2026-04-19)
+
+**M6 — Multi-port, multi-neighbor support + PCFlexnet interop:**
+
+- **M6.1** Config: repeatable `Port <name> <neighbor> <listen_call>` blocks
+  (up to 4 ports).  Legacy `Neighbor`/`PortName`/`FlexListenCall` keywords
+  still work — synthesised into `ports[0]` for back-compat.
+- **M6.2** Multi-listener `select()` loop.  Each configured port gets its
+  own `ax25_listen()` socket; the parent dispatches incoming connects
+  to per-port CE session children.
+- **M6.2b** Same-callsign bind across ports via `ax25d`'s
+  `fsa_digipeater[0]` device-selector trick.  `IW2OHX-3` can be bound
+  simultaneously on `ax1` (xnet) and `ax2` (pcf) with the kernel
+  correctly routing inbound SABM to the right port.
+- **M6.3** Proactive CE keepalive timer (every 20 s).  Prevents silent
+  link degrade over AXUDP tunnels when the peer doesn't autonomously
+  send keepalives.
+- **M6.6** Per-port `linkstats.<port>` files + `flock`-serialised merge
+  into unified `linkstats`.  URONode's `fl` command now shows one row
+  per active CE peering instead of racing on a single file.
+- **M6.7** Periodic route re-advertisement (default 60 s) keeps our
+  callsign fresh in the peer's destination table.  Configurable via
+  `RouteAdvertInterval`.
+- **M6.8** CE keepalive tail `'10\r'` restored (was 240 spaces, should
+  be 237 spaces + `'10\r'` per the wire-format spec).  Documented
+  embedded link-time frame in the keepalive trailer.
+- **M6.9** `LinkTimeReplyInterval` (default 320 s) rate-limits our
+  link-time frames.  Decoded from `flxnod32.dll`: PCFlexnet sets its
+  expected-reply timestamp to `now + 0xC80` (3200 ticks = 320 s) after
+  each RTT update.  Frames arriving before this timestamp produce a
+  negative delta that wraps and clamps to `0xFFF` (4095), producing
+  the "saturated RTT" symptom observed in pre-v0.7.0 runs.
+- **M6.9.1** Seed `last_lt_tx = now − interval` on CE session start to
+  prevent handshake-burst frames from all passing the rate gate.
+- **M6.9.2** Remove reply-to-peer-link-time path; proactive timer
+  handles all link-time sends cleanly.
+- **M6.9.3** Route-exchange fix — don't echo `'3+'` when replying to
+  peer's `'3+'`.  Reverse-engineered from flxnod32.dll: PCFlexnet's
+  `'+'` handler at `0x1000641B` rejects `'3+'` when token state is
+  non-zero, which it always is after receiving its own `'3+'`.  The
+  echo triggered DISC of the L2 link within 2 ms — killing every
+  prior route-exchange attempt with pcf.  With the fix, pcf's full
+  d-table (192 entries) now transfers successfully.
+- **M6.9.4** Periodic route re-advertisement sends compact record ONLY
+  (no `'3+'`, no `'3-'`).  The compact-record handler in flxnod32.dll
+  at `0x10006382` processes records unconditionally without touching
+  the token state machine — safe for repeated refreshes.
+
+**Protocol reverse engineering** — flxnod32.dll / FLXDECOD.DLL unpacked
+(UPX) and disassembled (Capstone) to determine:
+  - 100 ms timer tick at `[0x10020F04]` (confirmed via `GetTickCount`
+    polling at `0x10001D6D`)
+  - RTT update function at `0x10006F50` (clamp at 0xFFF, min 1, 16-slot
+    circular history, IIR-smoothed as `(peer_val + avg + 1) / 2`)
+  - `ts_ahead = 0xC80` (smoothed ≥ 96) or `(smoothed + 4) × 32`
+  - Token-state machine at `[ebx+0xF]` with reject-path at `0x100065A0`
+  - Command-dispatch table at `0x10009818` for `/c` `/m` `/q` `/s` `/t` `/w`
+    slash-commands
 
 ### v0.6.0 (2026-04-19)
 
