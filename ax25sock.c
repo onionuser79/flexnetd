@@ -410,9 +410,27 @@ int ax25_connect(const char *mycall, const char *neighbor,
 /*
  * Bind listen_call on the given axport and start listening.
  *
- * listen_call should be the port's own callsign from axports.
- * This matches the interface address, so bind() works natively
- * with SO_BINDTODEVICE.
+ * MULTI-PORT SAME-CALLSIGN TRICK (the "ax25d recipe"):
+ *
+ *   The naive approach — bind(listen_call) + SO_BINDTODEVICE — does NOT
+ *   pin the AX.25 socket to a specific interface.  The kernel's
+ *   ax25_bind() walks axports for `sax25_call` and takes the FIRST
+ *   matching device, ignoring SO_BINDTODEVICE entirely.  Two sockets
+ *   bound to the same callsign therefore share an ax25_dev and
+ *   collapse onto whichever port declares that callsign.
+ *
+ *   ax25d works around this using an undocumented-but-stable kernel
+ *   path in net/ax25/af_ax25.c: when bind() is called with
+ *   `sax25_ndigis == 1` on a `struct full_sockaddr_ax25`, the kernel
+ *   uses `fsa_digipeater[0]` as the DEVICE SELECTOR and leaves
+ *   `sax25_call` alone as the listener's source_addr.
+ *
+ *   So to bind the same user-visible listen_call (e.g. IW2OHX-3) on
+ *   several ports, we put the PORT's OWN axports callsign (e.g.
+ *   IW2OHX-3 for xnet, IW2OHX-4 for pcf) in fsa_digipeater[0].  Both
+ *   sockets end up with source_addr=IW2OHX-3 but different ax25_dev;
+ *   the kernel then correctly delivers incoming SABMs to the socket
+ *   whose ax25_dev matches the arrival interface.
  *
  * listen_call MUST NOT be in ax25d.conf — flexnetd owns it.
  * On the peer, configure: ro flexnet add <port_name> <listen_call>
@@ -423,6 +441,9 @@ int ax25_listen(const char *listen_call, const char *port_name)
 {
     LOG_INF("ax25_listen: binding %s on port %s", listen_call, port_name);
 
+    /* Resolve the port's own axports callsign — needed for the
+     * digipeater-as-device-selector trick.  Also lets us log which
+     * kernel interface this listener will actually be pinned to. */
     char port_call[MAX_CALLSIGN_LEN] = {0};
     const char *axports_paths[] = {
         "/usr/local/etc/ax25/axports",
@@ -433,7 +454,7 @@ int ax25_listen(const char *listen_call, const char *port_name)
     for (int i = 0; axports_paths[i]; i++) {
         if (axports_get_callsign(axports_paths[i], port_name,
                                  port_call, sizeof(port_call)) == 0) {
-            LOG_INF("ax25_listen: port '%s' -> callsign '%s'",
+            LOG_INF("ax25_listen: port '%s' -> own callsign '%s'",
                     port_name, port_call);
             found = 1; break;
         }
@@ -443,8 +464,13 @@ int ax25_listen(const char *listen_call, const char *port_name)
         return -1;
     }
 
+    /* Informational: resolve axport → kernel interface name for the log
+     * only (we no longer use SO_BINDTODEVICE — the digipeater-slot
+     * trick above handles device pinning). */
     char iface[IF_NAMESIZE] = {0};
-    int have_iface = (iface_from_callsign(port_call, iface, sizeof(iface)) == 0);
+    if (iface_from_callsign(port_call, iface, sizeof(iface)) == 0)
+        LOG_INF("ax25_listen: port '%s' → kernel interface '%s'",
+                port_name, iface);
 
     int fd = socket(AF_AX25, SOCK_SEQPACKET, 0);
     if (fd < 0) {
@@ -452,29 +478,32 @@ int ax25_listen(const char *listen_call, const char *port_name)
         return -1;
     }
 
-    if (have_iface) {
-        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
-                       iface, (socklen_t)(strlen(iface) + 1)) < 0)
-            LOG_WRN("ax25_listen: SO_BINDTODEVICE('%s'): %s",
-                    iface, strerror(errno));
-        else
-            LOG_INF("ax25_listen: SO_BINDTODEVICE='%s' OK", iface);
-    }
-
-    struct sockaddr_ax25 addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sax25_family = AF_AX25;
-    addr.sax25_ndigis = 0;
-    if (encode_call(listen_call, &addr.sax25_call) < 0) { close(fd); return -1; }
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        LOG_ERR("ax25_listen: bind('%s'): %s", listen_call, strerror(errno));
-        if (errno == EADDRINUSE)
-            LOG_ERR("ax25_listen: '%s' already bound — check ax25d.conf",
-                    listen_call);
+    /* Build full_sockaddr_ax25 with ndigis=1.
+     *   sax25_call        = listen_call   (what the listener matches against)
+     *   fsa_digipeater[0] = port_call     (device selector for ax25_bind()) */
+    struct full_sockaddr_ax25 fsa;
+    memset(&fsa, 0, sizeof(fsa));
+    fsa.fsa_ax25.sax25_family = AF_AX25;
+    fsa.fsa_ax25.sax25_ndigis = 1;
+    if (encode_call(listen_call, &fsa.fsa_ax25.sax25_call) < 0) {
         close(fd); return -1;
     }
-    LOG_INF("ax25_listen: bound '%s'", listen_call);
+    if (encode_call(port_call, &fsa.fsa_digipeater[0]) < 0) {
+        close(fd); return -1;
+    }
+
+    if (bind(fd, (struct sockaddr *)&fsa,
+             sizeof(struct full_sockaddr_ax25)) < 0) {
+        LOG_ERR("ax25_listen: bind('%s' on %s via '%s'): %s",
+                listen_call, port_name, port_call, strerror(errno));
+        if (errno == EADDRINUSE)
+            LOG_ERR("ax25_listen: '%s' already bound on %s — "
+                    "check ax25d.conf",
+                    listen_call, port_name);
+        close(fd); return -1;
+    }
+    LOG_INF("ax25_listen: bound '%s' on port %s (device-select via '%s')",
+            listen_call, port_name, port_call);
 
     if (listen(fd, 5) < 0) {
         LOG_ERR("ax25_listen: listen(): %s", strerror(errno));
