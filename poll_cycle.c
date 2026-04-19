@@ -242,6 +242,8 @@ static int run_native_ce_session(int fd)
     int     sent_routes   = 0;      /* advertised our routes to peer    */
     time_t  last_dest_write = 0;    /* last time we wrote destinations  */
     time_t  last_stats_write = 0;   /* last time we wrote linkstats     */
+    time_t  last_probe_sent  = 0;   /* last time we sent a type-6 probe */
+    int     probe_idx        = 0;   /* round-robin dtable index         */
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
@@ -264,7 +266,58 @@ static int run_native_ce_session(int fd)
             g_link_stats.dst_count = dtable_count_reachable();
             if (now - last_stats_write >= 30) {
                 output_write_linkstats();
+                path_pending_sweep();  /* expire stale in-flight queries */
                 last_stats_write = now;
+            }
+
+            /* M5.3: Periodic type-6 path probe (once per ~60s).
+             * Round-robin through the dtable, sending one request per
+             * interval.  Replies populate the path cache which flexdest
+             * reads with -r.  Skip destinations with recent cache hits
+             * is a future optimization.  Only start probing after the
+             * link is stable (routes exchanged). */
+            if (sent_routes && g_table.count > 0 &&
+                (now - last_probe_sent >= 60))
+            {
+                /* advance round-robin, skip unreachable entries */
+                int tries = 0;
+                while (tries < g_table.count) {
+                    if (probe_idx >= g_table.count) probe_idx = 0;
+                    DestEntry *e = &g_table.entries[probe_idx++];
+                    tries++;
+                    if (e->rtt >= g_cfg.infinity) continue;
+                    if (strcasecmp(e->callsign, g_cfg.mycall) == 0) continue;
+                    if (strcasecmp(e->callsign, g_cfg.flex_listen_call) == 0) continue;
+
+                    int qso = path_pending_next_qso();
+                    /* build target with mid-SSID for range entries */
+                    char target_call[MAX_CALLSIGN_LEN];
+                    int  mid = e->ssid_lo;
+                    if (mid > 0)
+                        snprintf(target_call, MAX_CALLSIGN_LEN, "%s-%d",
+                                 e->callsign, mid);
+                    else
+                        snprintf(target_call, MAX_CALLSIGN_LEN, "%s",
+                                 e->callsign);
+
+                    const char *origin = g_cfg.flex_listen_call[0]
+                                         ? g_cfg.flex_listen_call
+                                         : g_cfg.mycall;
+                    uint8_t pbuf[256];
+                    int plen = ce_build_path_request(pbuf, sizeof(pbuf),
+                                                     qso, CE_PATH_KIND_ROUTE,
+                                                     origin, target_call);
+                    if (plen > 0) {
+                        ax25_send(fd, PID_CE, pbuf, plen);
+                        g_link_stats.tx_bytes += plen;
+                        g_link_stats.tx_frames++;
+                        path_pending_add(qso, CE_PATH_KIND_ROUTE, target_call);
+                        last_probe_sent = now;
+                        LOG_INF("run_native_ce_session: sent type-6 "
+                                "probe qso=%d target=%s", qso, target_call);
+                    }
+                    break;
+                }
             }
         }
 
@@ -473,34 +526,79 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Destination broadcast: '6' prefix — the real routing data */
+        /* Type-6: Route / Traceroute REQUEST (M5.3) */
         if (buf[0] == '6') {
-            int rtt = 0, ssid_lo = 0, ssid_hi = 0;
-            char call[MAX_CALLSIGN_LEN] = {0};
-            char via[MAX_CALLSIGN_LEN] = {0};
-            char flag = ' ';
+            int qso = 0, kind = 0, hop_count = 0;
+            char origin[MAX_CALLSIGN_LEN] = {0};
+            char target[MAX_CALLSIGN_LEN] = {0};
 
-            if (ce_parse_dest_broadcast(buf, len, &rtt, call,
-                                        &ssid_lo, &ssid_hi,
-                                        via, &flag) == 0) {
-                DestEntry e;
-                memset(&e, 0, sizeof(e));
-                snprintf(e.callsign, MAX_CALLSIGN_LEN, "%s", call);
-                e.ssid_lo      = ssid_lo;
-                e.ssid_hi      = ssid_hi;
-                e.rtt          = rtt;
-                e.quality_flag = flag;
-                if (via[0])
-                    snprintf(e.via_callsign, MAX_CALLSIGN_LEN, "%s", via);
-                if (dtable_merge(&e) > 0) {
-                    merged_total++;
-                    LOG_DBG("run_native_ce_session: type-6 merged %s "
-                            "%d-%d rtt=%d via=%s flag='%c'",
-                            call, ssid_lo, ssid_hi, rtt,
-                            via[0] ? via : "(direct)", flag);
+            int pr = ce_parse_path_frame(buf, len, NULL,
+                                         &qso, &kind, &hop_count,
+                                         origin, target);
+            if (pr == CE_FRAME_PATH_REQUEST) {
+                LOG_INF("run_native_ce_session: type-6 REQUEST qso=%d "
+                        "kind=%s hops=%d origin=%s target=%s",
+                        qso,
+                        kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
+                        hop_count, origin, target);
+
+                /* If the target is our mycall or listen_call, the peer
+                 * is asking us for a path TO us — reply with just our
+                 * own callsign as the (final) hop. */
+                if (strcasecmp(target, g_cfg.mycall) == 0 ||
+                    strcasecmp(target, g_cfg.flex_listen_call) == 0)
+                {
+                    const char *our[1] = { g_cfg.flex_listen_call[0]
+                                           ? g_cfg.flex_listen_call
+                                           : g_cfg.mycall };
+                    uint8_t rbuf[128];
+                    int rlen = ce_build_path_reply(rbuf, sizeof(rbuf),
+                                                   qso, kind, our, 1);
+                    if (rlen > 0) {
+                        ax25_send(fd, PID_CE, rbuf, rlen);
+                        g_link_stats.tx_bytes += rlen;
+                        g_link_stats.tx_frames++;
+                        LOG_INF("run_native_ce_session: sent type-7 "
+                                "reply (qso=%d, single-hop)", qso);
+                    }
+                } else {
+                    /* Target is not us.  In single-neighbor setup we
+                     * cannot forward — log and drop.  Cross-port
+                     * forwarding is the M2.1/M6 milestone. */
+                    LOG_DBG("run_native_ce_session: type-6 for %s "
+                            "not us — ignored (forwarding is M2.1)",
+                            target);
                 }
             } else {
                 LOG_DBG("run_native_ce_session: type-6 parse failed "
+                        "(len=%d)", len);
+            }
+            t_start = time(NULL);
+            continue;
+        }
+
+        /* Type-7: Route / Traceroute REPLY (M5.3) */
+        if (buf[0] == '7') {
+            PathReply reply;
+            int pr = ce_parse_path_frame(buf, len, &reply,
+                                         NULL, NULL, NULL, NULL, NULL);
+            if (pr == CE_FRAME_PATH_REPLY) {
+                LOG_INF("run_native_ce_session: type-7 REPLY qso=%d "
+                        "kind=%s hops=%d",
+                        reply.qso,
+                        reply.kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
+                        reply.hop_callsign_count);
+                /* Match to outstanding query and clear pending */
+                int slot = path_pending_find(reply.qso);
+                if (slot >= 0) {
+                    LOG_INF("  matches pending target=%s",
+                            g_path_pending[slot].target);
+                    path_pending_remove(reply.qso);
+                }
+                /* Cache the reply so flexdest can show it */
+                output_write_paths_cache_add(&reply);
+            } else {
+                LOG_DBG("run_native_ce_session: type-7 parse failed "
                         "(len=%d)", len);
             }
             t_start = time(NULL);

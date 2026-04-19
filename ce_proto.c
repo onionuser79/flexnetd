@@ -381,10 +381,16 @@ int ce_parse_frame(const uint8_t *data, int len,
         }
     }
 
-    /* ── Destination broadcast: '6' prefix ─────────────────────────── */
+    /* ── Type-6 path REQUEST ───────────────────────────────────────── */
     if (data[0] == '6') {
-        LOG_DBG("ce_parse_frame: type-6 destination broadcast (len=%d)", len);
-        return CE_FRAME_DEST_BCAST;
+        LOG_DBG("ce_parse_frame: type-6 path request (len=%d)", len);
+        return CE_FRAME_PATH_REQUEST;
+    }
+
+    /* ── Type-7 path REPLY ─────────────────────────────────────────── */
+    if (data[0] == '7') {
+        LOG_DBG("ce_parse_frame: type-7 path reply (len=%d)", len);
+        return CE_FRAME_PATH_REPLY;
     }
 
     /* ── Compact record: '3' prefix ───────────────────────────────── */
@@ -503,4 +509,327 @@ int ce_parse_compact_records(const uint8_t *data, int len,
     LOG_INF("ce_parse_compact_records: %d entries (withdrawal=%d)",
             count, withdrawal);
     return count;
+}
+
+/* ── Path query protocol (CE type-6 / type-7) ─────────────────────── */
+
+/*
+ * ce_build_path_request — build a type-6 Route or Traceroute REQUEST.
+ *
+ * Wire:  '6' HOP(1) QSO(5) ORIGIN ' ' TARGET
+ *
+ * Initially emitted with HOP=0x20 (hop_count=0) — each forwarder
+ * increments the byte before re-emitting.
+ *
+ * The QSO field is sprintf("%5u", qso) — right-aligned decimal in 5
+ * bytes.  For Traceroute (kind == CE_PATH_KIND_TRACE), the caller wants
+ * bit 0x40 set in the first byte of QSO; we OR it in after sprintf.
+ * '%5u' produces ' ' (0x20) for small numbers, so the OR produces 0x60.
+ */
+int ce_build_path_request(uint8_t *buf, int buflen,
+                          int qso, int kind,
+                          const char *origin_call,
+                          const char *target_call)
+{
+    if (!buf || !origin_call || !target_call)
+        return -1;
+    if (qso < 0) qso = 0;
+
+    char qso_field[CE_PATH_QSO_FIELD_LEN + 1];
+    snprintf(qso_field, sizeof(qso_field), "%5u", (unsigned)(qso % 100000));
+
+    if (kind == CE_PATH_KIND_TRACE)
+        qso_field[0] |= CE_PATH_TRACE_BIT;
+
+    /* compose: '6' + hop_byte + qso(5) + origin + ' ' + target
+     * hop_byte starts at 0x20 (hop count = 0) */
+    int needed = 2 + CE_PATH_QSO_FIELD_LEN +
+                 (int)strlen(origin_call) + 1 +
+                 (int)strlen(target_call);
+    if (needed > buflen) {
+        LOG_ERR("ce_build_path_request: buffer too small (%d need %d)",
+                buflen, needed);
+        return -1;
+    }
+
+    int pos = 0;
+    buf[pos++] = '6';
+    buf[pos++] = CE_PATH_HOP_BYTE_BASE;  /* 0x20 — hop_count = 0 */
+    memcpy(buf + pos, qso_field, CE_PATH_QSO_FIELD_LEN);
+    pos += CE_PATH_QSO_FIELD_LEN;
+
+    int ol = (int)strlen(origin_call);
+    memcpy(buf + pos, origin_call, (size_t)ol);
+    pos += ol;
+    buf[pos++] = ' ';
+    int tl = (int)strlen(target_call);
+    memcpy(buf + pos, target_call, (size_t)tl);
+    pos += tl;
+
+    LOG_INF("ce_build_path_request: qso=%d kind=%s %s -> %s (%d bytes)",
+            qso,
+            kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
+            origin_call, target_call, pos);
+    return pos;
+}
+
+/*
+ * ce_build_path_reply — build a type-7 REPLY with the accumulated hops.
+ *
+ * Wire:  '7' HOP(1) QSO(5) ' ' HOP_1 ' ' HOP_2 ... HOP_N
+ *
+ * HOP byte is derived from n_hops.
+ */
+int ce_build_path_reply(uint8_t *buf, int buflen,
+                        int qso, int kind,
+                        const char *const *hops, int n_hops)
+{
+    if (!buf || n_hops < 0) return -1;
+    if (n_hops > CE_PATH_MAX_HOPS) n_hops = CE_PATH_MAX_HOPS;
+
+    char qso_field[CE_PATH_QSO_FIELD_LEN + 1];
+    snprintf(qso_field, sizeof(qso_field), "%5u", (unsigned)(qso % 100000));
+    if (kind == CE_PATH_KIND_TRACE)
+        qso_field[0] |= CE_PATH_TRACE_BIT;
+
+    int pos = 0;
+
+    /* prelude sanity check: 2 + 5 bytes */
+    if (buflen < 2 + CE_PATH_QSO_FIELD_LEN) return -1;
+    buf[pos++] = '7';
+    buf[pos++] = (uint8_t)(CE_PATH_HOP_BYTE_BASE + n_hops);
+    memcpy(buf + pos, qso_field, CE_PATH_QSO_FIELD_LEN);
+    pos += CE_PATH_QSO_FIELD_LEN;
+
+    /* Hops are space-separated AFTER the QSO field — but there is NO
+     * separator between QSO and the first hop (the fixed 5-byte QSO
+     * width tells the parser where to split).  E.g. captured reply:
+     *   "7$    1IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S"
+     *             ^^^^^^^ QSO(5)  ^ first hop (no leading space)
+     */
+    int first = 1;
+    for (int i = 0; i < n_hops; i++) {
+        const char *h = hops ? hops[i] : NULL;
+        if (!h || !*h) continue;
+        int hl = (int)strlen(h);
+        int need = (first ? 0 : 1) + hl;
+        if (pos + need >= buflen) {
+            LOG_ERR("ce_build_path_reply: buffer overflow at hop %d", i);
+            return -1;
+        }
+        if (!first) buf[pos++] = ' ';
+        memcpy(buf + pos, h, (size_t)hl);
+        pos += hl;
+        first = 0;
+    }
+
+    LOG_INF("ce_build_path_reply: qso=%d kind=%s hops=%d (%d bytes)",
+            qso, kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
+            n_hops, pos);
+    return pos;
+}
+
+/*
+ * ce_parse_path_frame — parse a type-6 or type-7 frame.
+ *
+ * Depending on which, populates a subset of the output pointers.
+ * Returns CE_FRAME_PATH_REQUEST, CE_FRAME_PATH_REPLY, or -1.
+ *
+ * Output conventions:
+ *   for type-6 (request): origin_out, target_out, qso_out, kind_out,
+ *                         hop_count_out populated; reply_out untouched.
+ *   for type-7 (reply):   reply_out populated; origin_out/target_out
+ *                         may be ignored (can be NULL).
+ */
+int ce_parse_path_frame(const uint8_t *data, int len,
+                        PathReply *reply_out,
+                        int *qso_out, int *kind_out, int *hop_count_out,
+                        char *origin_out, char *target_out)
+{
+    if (!data || len < 2 + CE_PATH_QSO_FIELD_LEN) return -1;
+    if (data[0] != '6' && data[0] != '7') return -1;
+
+    int is_reply = (data[0] == '7');
+
+    /* HOP_BYTE */
+    int hop_byte = data[1];
+    int hop_count = hop_byte - CE_PATH_HOP_BYTE_BASE;
+    if (hop_count < 0) hop_count = 0;
+
+    /* QSO_FIELD: 5 bytes, first byte has traceroute flag */
+    char qso_field_raw[CE_PATH_QSO_FIELD_LEN + 1];
+    memcpy(qso_field_raw, data + 2, CE_PATH_QSO_FIELD_LEN);
+    qso_field_raw[CE_PATH_QSO_FIELD_LEN] = '\0';
+
+    int kind = (qso_field_raw[0] & CE_PATH_TRACE_BIT)
+               ? CE_PATH_KIND_TRACE : CE_PATH_KIND_ROUTE;
+
+    /* mask the trace bit before parsing the number */
+    char qso_field_masked[CE_PATH_QSO_FIELD_LEN + 1];
+    memcpy(qso_field_masked, qso_field_raw, CE_PATH_QSO_FIELD_LEN + 1);
+    qso_field_masked[0] = (char)(qso_field_masked[0] & ~CE_PATH_TRACE_BIT);
+
+    /* atoi ignores leading spaces; but if we stripped 0x40 from a
+     * space-padded first byte (0x20 | 0x40 = 0x60 '`'), we need to
+     * convert that back to a space so atoi sees a valid number. */
+    for (int i = 0; i < CE_PATH_QSO_FIELD_LEN; i++) {
+        if (qso_field_masked[i] < '0' || qso_field_masked[i] > '9')
+            qso_field_masked[i] = ' ';
+    }
+    int qso = atoi(qso_field_masked);
+
+    if (qso_out)        *qso_out = qso;
+    if (kind_out)       *kind_out = kind;
+    if (hop_count_out)  *hop_count_out = hop_count;
+
+    /* ── Type-6 request: origin + ' ' + target, no hop list ─────── */
+    if (!is_reply) {
+        int remain_off = 2 + CE_PATH_QSO_FIELD_LEN;
+        /* copy remainder to a mutable buffer, strip CR/LF */
+        char rem[256];
+        int rlen = len - remain_off;
+        if (rlen < 0) rlen = 0;
+        if (rlen >= (int)sizeof(rem)) rlen = (int)sizeof(rem) - 1;
+        memcpy(rem, data + remain_off, (size_t)rlen);
+        rem[rlen] = '\0';
+        char *nl = strpbrk(rem, "\r\n");
+        if (nl) *nl = '\0';
+
+        /* split on space: first token = origin, rest = target */
+        char *sp = strchr(rem, ' ');
+        if (!sp) {
+            LOG_WRN("ce_parse_path_frame: type-6 missing target (%s)", rem);
+            if (origin_out) snprintf(origin_out, MAX_CALLSIGN_LEN, "%s", rem);
+            if (target_out) target_out[0] = '\0';
+            return CE_FRAME_PATH_REQUEST;
+        }
+        *sp = '\0';
+        /* strip trailing whitespace from target (be defensive) */
+        char *tend = sp + strlen(sp + 1);
+        while (tend > sp + 1 && (*tend == ' ' || *tend == '\t'))
+            *tend-- = '\0';
+        if (origin_out) snprintf(origin_out, MAX_CALLSIGN_LEN, "%s", rem);
+        if (target_out) snprintf(target_out, MAX_CALLSIGN_LEN, "%s", sp + 1);
+        LOG_INF("ce_parse_path_frame: type-6 qso=%d kind=%s hops=%d "
+                "origin=%s target=%s",
+                qso, kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
+                hop_count, rem, sp + 1);
+        return CE_FRAME_PATH_REQUEST;
+    }
+
+    /* ── Type-7 reply: accumulated hop list ─────────────────────── */
+    if (!reply_out) return CE_FRAME_PATH_REPLY;
+
+    memset(reply_out, 0, sizeof(*reply_out));
+    reply_out->qso = qso;
+    reply_out->kind = kind;
+    reply_out->hop_count = hop_count;
+    reply_out->received = time(NULL);
+
+    int off = 2 + CE_PATH_QSO_FIELD_LEN;
+    /* optional leading space(s) */
+    while (off < len && data[off] == ' ') off++;
+
+    /* copy remainder, strip CR/LF */
+    char rem[512];
+    int rlen = len - off;
+    if (rlen < 0) rlen = 0;
+    if (rlen >= (int)sizeof(rem)) rlen = (int)sizeof(rem) - 1;
+    memcpy(rem, data + off, (size_t)rlen);
+    rem[rlen] = '\0';
+    char *nl = strpbrk(rem, "\r\n");
+    if (nl) *nl = '\0';
+
+    /* tokenize on space */
+    int n = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(rem, " ", &save);
+         tok && n < CE_PATH_MAX_HOPS;
+         tok = strtok_r(NULL, " ", &save))
+    {
+        if (!*tok) continue;
+        snprintf(reply_out->hop_callsigns[n], MAX_CALLSIGN_LEN, "%s", tok);
+        n++;
+    }
+    reply_out->hop_callsign_count = n;
+
+    LOG_INF("ce_parse_path_frame: type-7 qso=%d kind=%s hops=%d callsigns=%d",
+            qso, kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
+            hop_count, n);
+    for (int i = 0; i < n; i++)
+        LOG_DBG("  hop[%d] = %s", i, reply_out->hop_callsigns[i]);
+
+    return CE_FRAME_PATH_REPLY;
+}
+
+/* ── Pending query tracking ────────────────────────────────────────── */
+
+PathPending g_path_pending[CE_PATH_MAX_PENDING];
+static int  g_path_qso_counter = 0;
+
+void path_pending_init(void)
+{
+    memset(g_path_pending, 0, sizeof(g_path_pending));
+    g_path_qso_counter = 0;
+}
+
+int path_pending_next_qso(void)
+{
+    /* monotonic, modulo 100000 so it fits %5u */
+    g_path_qso_counter = (g_path_qso_counter + 1) % 100000;
+    if (g_path_qso_counter == 0) g_path_qso_counter = 1;
+    return g_path_qso_counter;
+}
+
+int path_pending_add(int qso, int kind, const char *target)
+{
+    path_pending_sweep();
+    for (int i = 0; i < CE_PATH_MAX_PENDING; i++) {
+        if (!g_path_pending[i].active) {
+            g_path_pending[i].active = 1;
+            g_path_pending[i].qso = qso;
+            g_path_pending[i].kind = kind;
+            g_path_pending[i].sent = time(NULL);
+            snprintf(g_path_pending[i].target, MAX_CALLSIGN_LEN, "%s",
+                     target ? target : "");
+            LOG_DBG("path_pending_add: slot %d qso=%d target=%s", i, qso,
+                    target ? target : "?");
+            return 0;
+        }
+    }
+    LOG_WRN("path_pending_add: no free slots (max=%d)", CE_PATH_MAX_PENDING);
+    return -1;
+}
+
+int path_pending_find(int qso)
+{
+    for (int i = 0; i < CE_PATH_MAX_PENDING; i++) {
+        if (g_path_pending[i].active && g_path_pending[i].qso == qso)
+            return i;
+    }
+    return -1;
+}
+
+void path_pending_remove(int qso)
+{
+    int i = path_pending_find(qso);
+    if (i >= 0) {
+        LOG_DBG("path_pending_remove: slot %d qso=%d target=%s",
+                i, qso, g_path_pending[i].target);
+        g_path_pending[i].active = 0;
+    }
+}
+
+void path_pending_sweep(void)
+{
+    time_t now = time(NULL);
+    for (int i = 0; i < CE_PATH_MAX_PENDING; i++) {
+        if (g_path_pending[i].active &&
+            (now - g_path_pending[i].sent) > CE_PATH_TIMEOUT_SEC)
+        {
+            LOG_INF("path_pending_sweep: timeout slot %d qso=%d target=%s",
+                    i, g_path_pending[i].qso, g_path_pending[i].target);
+            g_path_pending[i].active = 0;
+        }
+    }
 }
