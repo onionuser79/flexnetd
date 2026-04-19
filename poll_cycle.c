@@ -190,12 +190,36 @@ static int ce_send_init_response(int fd)
  * Sends:  3+\r  (request token)
  *         3<CALL><SSID_LO><SSID_HI><RTT> \r  (our route)
  *         3-\r  (release token)
+ *
+ * Port-aware (M6.7): when g_port_idx is valid, picks the listen_call and
+ * SSID range from g_cfg.ports[g_port_idx] so each CE child advertises
+ * with the correct port-local identity.  Both peers (IW2OHX-14 on xnet
+ * and IW2OHX-12 on pcf) therefore see our callsign (IW2OHX-3) re-advertised
+ * on their respective links.  Falls back to legacy flat fields when no
+ * port context is set (e.g. pipe-mode handler via ax25d).
  */
 static int send_own_routes(int fd)
 {
+    /* Pick the source callsign (listen_call) and SSID range for THIS port. */
+    const char *listen_call = NULL;
+    int         min_ssid    = g_cfg.min_ssid;
+    int         max_ssid    = g_cfg.max_ssid;
+
+    if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports) {
+        const PortCfg *pc = &g_cfg.ports[g_port_idx];
+        if (pc->listen_call[0]) listen_call = pc->listen_call;
+        if (pc->min_ssid || pc->max_ssid) {
+            min_ssid = pc->min_ssid;
+            max_ssid = pc->max_ssid;
+        }
+    }
+    if (!listen_call || !listen_call[0])
+        listen_call = g_cfg.flex_listen_call[0] ? g_cfg.flex_listen_call
+                                                : g_cfg.mycall;
+
     char base[MAX_CALLSIGN_LEN] = {0};
     int  dummy_ssid = 0;
-    callsign_parse_ssid(g_cfg.mycall, base, &dummy_ssid);
+    callsign_parse_ssid(listen_call, base, &dummy_ssid);
 
     /* Request token */
     uint8_t req[] = { '3', '+', '\r' };
@@ -204,7 +228,7 @@ static int send_own_routes(int fd)
     /* Our route via ce_build_record (single wire-format source) */
     uint8_t route[64];
     int rlen = ce_build_record(route, sizeof(route),
-                               base, g_cfg.min_ssid, g_cfg.max_ssid,
+                               base, min_ssid, max_ssid,
                                1, 0);  /* RTT=1 (local/direct), not indirect */
     if (rlen > 0)
         ax25_send(fd, PID_CE, route, rlen);
@@ -213,8 +237,11 @@ static int send_own_routes(int fd)
     uint8_t rel[] = { '3', '-', '\r' };
     ax25_send(fd, PID_CE, rel, 3);
 
-    LOG_INF("send_own_routes: advertised %s SSID %d-%d RTT=1",
-            base, g_cfg.min_ssid, g_cfg.max_ssid);
+    const char *port_name = (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports)
+                            ? g_cfg.ports[g_port_idx].name
+                            : g_cfg.port_name;
+    LOG_INF("send_own_routes: port=%s advertised %s SSID %d-%d RTT=1",
+            port_name, base, min_ssid, max_ssid);
     return 0;
 }
 
@@ -245,6 +272,7 @@ static int run_native_ce_session(int fd)
     time_t  last_probe_sent  = 0;   /* last time we sent a type-6 probe */
     int     probe_idx        = 0;   /* round-robin dtable index         */
     time_t  last_keepalive_tx = time(NULL);   /* proactive keepalive timer */
+    time_t  last_routes_tx   = 0;      /* M6.7: last time we sent 3+/route/3- */
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
@@ -312,6 +340,36 @@ static int run_native_ce_session(int fd)
                     lt_sent_pending = 1;
                 }
                 last_keepalive_tx = now;
+            }
+
+            /* M6.7: periodic re-advertisement of our routes.
+             *
+             * FlexNet peers (xnet, PCFlexnet) age out type-3 route records
+             * after roughly 60–120 s if not refreshed.  Without periodic
+             * re-advertisement, our own callsign (IW2OHX-3) drops out of
+             * the peer's destination table after ~2 min — observed on
+             * IW2OHX-14 as "dst via IW2OHX-3 = 0" while the link stays up.
+             *
+             * This also affects M2 transit: nodes upstream of the peer
+             * that ask "how do I reach IW2OHX-3?" get an unreachable
+             * reply once our route has aged out.
+             *
+             * The re-advert runs per-CE-child, so IW2OHX-14 (xnet) and
+             * IW2OHX-12 (pcf) each receive their own periodic refresh.
+             * send_own_routes() is port-aware and advertises using the
+             * port's listen_call and SSID range.
+             *
+             * Only starts after the initial advertisement (sent_routes=1)
+             * so we don't race the handshake.  Interval=0 disables
+             * re-advertisement (once-only, legacy behaviour). */
+            if (sent_routes && g_cfg.route_advert_interval > 0 &&
+                (now - last_routes_tx >= g_cfg.route_advert_interval))
+            {
+                LOG_DBG("run_native_ce_session: periodic route re-advert "
+                        "(%lds since last)",
+                        (long)(now - last_routes_tx));
+                send_own_routes(fd);
+                last_routes_tx = now;
             }
 
             /* M5.3: Periodic type-6 path probe (interval from config).
@@ -470,7 +528,8 @@ static int run_native_ce_session(int fd)
                 LOG_INF("run_native_ce_session: link stable — "
                         "sending our routes");
                 send_own_routes(fd);
-                sent_routes = 1;
+                sent_routes    = 1;
+                last_routes_tx = time(NULL);   /* M6.7: seed re-advert timer */
             }
 
             t_start = time(NULL);
@@ -676,7 +735,8 @@ static int run_native_ce_session(int fd)
                 LOG_INF("run_native_ce_session: '3+' received from peer");
                 if (!sent_routes) {
                     send_own_routes(fd);
-                    sent_routes = 1;
+                    sent_routes    = 1;
+                    last_routes_tx = time(NULL);   /* M6.7: seed re-advert timer */
                 } else {
                     /* Already sent — just ack the token request */
                     uint8_t ack[] = { '3', '+', '\r' };
