@@ -81,7 +81,7 @@ path query protocol (CE type-6 REQUEST / type-7 REPLY).
   - `ce_build_path_request` / `ce_build_path_reply`
   - `ce_parse_path_frame`
   - pending query table with QSO correlation and 30-second timeout
-  - periodic eager probing: one destination per ~60s (round-robin)
+  - periodic probing with configurable `PathProbeInterval`
   - path cache file (`/usr/local/var/lib/ax25/flex/paths`)
 - **flexdest `-r`** flag reads the cache and prints a line after each
   matched destination:
@@ -94,6 +94,39 @@ path query protocol (CE type-6 REQUEST / type-7 REPLY).
   `TYPE + HopCount_byte(0x20+N) + QSO_field(5 bytes, "%5u") + callsigns`
 - M5.1/M5.2 (local partial route) remain as fallback when the cache
   doesn't yet have an entry for the requested destination.
+
+#### Peer compatibility (live testing, 2026-04-19)
+
+Live testing against xnet (our current FlexNet neighbor) confirmed:
+
+| Peer           | Sends type-7? | Full path display? |
+|----------------|--------------|--------------------|
+| xnet (ARM)     | **No**       | **No**             |
+| PC FlexNet     | Yes          | Yes (when peered)  |
+
+**xnet does NOT implement CE type-7 replies.** Our earlier RE of
+`xnet_arm7` already showed no type-7 emit code, and live testing
+confirmed it: every type-6 probe we send gets a **type-3 compact
+record** back instead (the destination's routing entry), not a
+type-7 path reply.
+
+**Consequences:**
+
+1. Against an xnet-only neighbor, `flexdest -r` will always fall
+   back to the M5.1-style partial route (`... <via> <dest>`).
+2. Full `*** route:` path display requires peering with a
+   PC-FlexNet-based node that implements type-7. This lands
+   automatically once **M6 (multi-neighbor)** is done and we peer
+   with both xnet and a PC-FlexNet node.
+3. Production default for `PathProbeInterval` is now **0**
+   (disabled) to avoid pointless traffic against xnet neighbors.
+   Set to 60 (production) or 10 (debug) when a type-7-capable
+   peer exists.
+4. flexnetd now correlates incoming type-3 records against pending
+   type-6 queries by base callsign and clears the pending slot
+   when matched, so no spurious "UNSOLICITED" warnings are logged.
+   The destination is confirmed reachable (but full hop list is
+   not available from this peer).
 
 ### v0.7.0 — M6: Multi-neighbor support (prerequisite for M2.1)
 
