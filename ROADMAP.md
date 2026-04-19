@@ -105,10 +105,28 @@ Live testing against xnet (our current FlexNet neighbor) confirmed:
 | PC FlexNet     | Yes          | Yes (when peered)  |
 
 **xnet does NOT implement CE type-7 replies.** Our earlier RE of
-`xnet_arm7` already showed no type-7 emit code, and live testing
-confirmed it: every type-6 probe we send gets a **type-3 compact
-record** back instead (the destination's routing entry), not a
-type-7 path reply.
+`xnet_arm7` showed no type-7 emit code, and live testing confirmed
+it: every type-6 probe we send **times out with no reply at all**.
+
+#### Common misinterpretation — READ THIS FIRST
+
+When probing was enabled, the log showed type-3 compact records
+arriving shortly after our type-6 probes, and it was tempting to
+read those as "replies" to our probes.  **They are not.**  A
+control run with `PathProbeInterval 0` (no probes sent at all)
+showed the peer still emits exactly the same periodic type-3
+routing updates on its normal ~4-minute broadcast cycle.  The
+type-3 arrivals just happened to coincide with our probe timing.
+
+In short: with an xnet peer, a type-6 probe goes out and is
+discarded by the peer.  Any type-3 that arrives afterwards is
+unrelated routing traffic, not a reply.
+
+The `path_pending` type-3 correlation shortcut in `poll_cycle.c`
+(clearing pending slots when the target callsign appears in a
+type-3) is kept because it is still technically correct — the
+destination is confirmed reachable — but it must not be read as
+"xnet responded to our query".
 
 **Consequences:**
 
