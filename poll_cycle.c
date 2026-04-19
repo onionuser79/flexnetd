@@ -670,6 +670,38 @@ static int run_native_ce_session(int fd)
                         "%d entries parsed, %d total merged",
                         n, merged_total);
 
+                /* M5.3: some peers (notably xnet) respond to our type-6
+                 * REQUEST with a type-3 compact record rather than a
+                 * type-7 REPLY.  When that happens, the type-3 contains
+                 * the destination we asked about.  Match any entry in
+                 * this frame against pending queries by target callsign;
+                 * if found, clear the pending slot so the timeout does
+                 * not fire and no spurious "UNSOLICITED" warning is
+                 * logged later.  This gives us reachability confirmation
+                 * (but not full path info — xnet doesn't support that). */
+                for (int i = 0; i < n; i++) {
+                    DestEntry *ent = &entries[i];
+                    for (int p = 0; p < CE_PATH_MAX_PENDING; p++) {
+                        if (!g_path_pending[p].active) continue;
+                        /* match by base callsign (ignore SSID variations) */
+                        char pbase[MAX_CALLSIGN_LEN];
+                        snprintf(pbase, sizeof(pbase), "%s",
+                                 g_path_pending[p].target);
+                        char *dash = strchr(pbase, '-');
+                        if (dash) *dash = '\0';
+                        if (strcasecmp(pbase, ent->callsign) == 0) {
+                            LOG_INF("path_pending: type-3 satisfies "
+                                    "pending probe slot=%d qso=%d "
+                                    "target=%s (peer lacks type-7, "
+                                    "only reachability confirmed)",
+                                    p, g_path_pending[p].qso,
+                                    g_path_pending[p].target);
+                            path_pending_remove(g_path_pending[p].qso);
+                            break;
+                        }
+                    }
+                }
+
                 /* Write destinations periodically (every 60s) so
                  * uronode sees fresh data while the session is alive.
                  * Without this, the file is only written on disconnect. */

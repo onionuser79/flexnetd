@@ -76,7 +76,7 @@
 #define CE_PATH_TIMEOUT_SEC     30       /* pending query expiry          */
 #define CE_PATH_CACHE_TTL_SEC   300      /* path cache freshness          */
 #define CE_PATH_MAX_CACHE       256      /* cached reply buffer entries   */
-#define CE_PATH_PROBE_SEC       60       /* default interval between probes */
+#define CE_PATH_PROBE_SEC       0        /* default: disabled. Only useful against peers that send type-7 replies (e.g. PC/FlexNet). xnet does not. */
 
 /* Path kinds (bit 0x40 of QSO[0]) */
 #define CE_PATH_KIND_ROUTE      0        /* bit clear = Route             */
