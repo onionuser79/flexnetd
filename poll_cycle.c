@@ -187,27 +187,36 @@ static int ce_send_init_response(int fd)
 /*
  * send_own_routes — advertise our local destinations to the peer.
  *
- * When include_request_token is non-zero:
- *   3+\r                                       (we initiate — request token)
- *   3<CALL><SSID_LO><SSID_HI><RTT> \r          (our route)
- *   3-\r                                       (release token)
+ * mode = 0 → record only (no '3+', no '3-')
+ *          Used for periodic refresh (M6.7).  The compact record frame
+ *          is processed unconditionally by peer (no state check), so
+ *          this path never triggers any token-state machine transitions.
+ *          This is the safest option for keeping our route fresh in
+ *          the peer's table without disturbing its token state.
  *
- * When include_request_token is zero (replying to peer's '3+'):
- *   3<CALL><SSID_LO><SSID_HI><RTT> \r          (our route)
- *   3-\r                                       (release token)
+ * mode = 1 → record + '3-' (reply-mode, no '3+')
+ *          Used when replying to the peer's '3+' request.  The peer
+ *          has already taken the token; we send our records and close
+ *          with '3-' so the peer can release and resume its own
+ *          send phase.
  *
- * Rationale (M6.9.3 — observed 2026-04-19):
- *   PCFlexnet sends us '3+' right after handshake to request our routes.
- *   Our old code replied with '3+' + record + '3-'.  The extra '3+'
- *   arrives at pcf while pcf's token-state [ebx+0xF] is already 3 (it
- *   set 0→3 when it sent '3+').  Per the '+' handler at VA 0x1000641B,
- *   '3+' with state != 0 hits the reject path (0x100065A0) and pcf
- *   disconnects the link.  Captured in the traffic log:
- *     21:43:12.542  pcf→us "3+"
- *     21:43:12.543  us→pcf "3+"           <-- reject trigger
- *     21:43:12.547  us→pcf "3-"
- *     21:43:12.549  pcf→us DISC+          <-- pcf drops the link
- *   Fix: never echo '3+' when responding to the peer's '3+' request.
+ * mode = 2 → '3+' + record + '3-' (full we-initiate)
+ *          Reserved for future use (currently no caller).  Only valid
+ *          when the peer's token state is 0 — which we cannot observe
+ *          remotely, so we no longer use this mode.
+ *
+ * Rationale (M6.9.4 — observed 2026-04-19):
+ *   Session 717 showed that even AFTER M6.9.3 (reply-without-'3+'),
+ *   our M6.7 periodic re-advertisement still sent '3+' every 60 s.
+ *   Pcf's token state after the earlier exchange was 3 (not 0), so
+ *   our '3+' hit the reject path (VA 0x100065A0) and pcf DM'd the
+ *   link ~2 s later.  Session lived only 1 min 07 s before DISC.
+ *
+ * Observed '3+' acceptance rule in pcf (flxnod32.dll):
+ *     '+' handler at VA 0x1000641B requires [ebx+0xF] == 0
+ *     else → reject (VA 0x100065A0) → eventually DM
+ * We cannot know pcf's token-state remotely, so never send '3+'.
+ * For periodic refresh, plain compact records are always safe.
  *
  * Port-aware (M6.7): when g_port_idx is valid, picks the listen_call and
  * SSID range from g_cfg.ports[g_port_idx] so each CE child advertises
@@ -216,7 +225,11 @@ static int ce_send_init_response(int fd)
  * on their respective links.  Falls back to legacy flat fields when no
  * port context is set (e.g. pipe-mode handler via ax25d).
  */
-static int send_own_routes(int fd, int include_request_token)
+#define SEND_ROUTES_RECORD_ONLY   0
+#define SEND_ROUTES_REPLY_CLOSE   1
+#define SEND_ROUTES_FULL_INITIATE 2
+
+static int send_own_routes(int fd, int mode)
 {
     /* Pick the source callsign (listen_call) and SSID range for THIS port. */
     const char *listen_call = NULL;
@@ -239,8 +252,8 @@ static int send_own_routes(int fd, int include_request_token)
     int  dummy_ssid = 0;
     callsign_parse_ssid(listen_call, base, &dummy_ssid);
 
-    /* Request token (only when WE initiate the exchange) */
-    if (include_request_token) {
+    /* Request token — only in FULL_INITIATE mode (currently unused) */
+    if (mode == SEND_ROUTES_FULL_INITIATE) {
         uint8_t req[] = { '3', '+', '\r' };
         ax25_send(fd, PID_CE, req, 3);
     }
@@ -253,16 +266,22 @@ static int send_own_routes(int fd, int include_request_token)
     if (rlen > 0)
         ax25_send(fd, PID_CE, route, rlen);
 
-    /* Release token (always — signals end of our batch) */
-    uint8_t rel[] = { '3', '-', '\r' };
-    ax25_send(fd, PID_CE, rel, 3);
+    /* Release token — only when closing an active exchange (REPLY_CLOSE
+     * or FULL_INITIATE).  RECORD_ONLY mode omits it to avoid touching
+     * the peer's state machine on periodic refreshes. */
+    if (mode != SEND_ROUTES_RECORD_ONLY) {
+        uint8_t rel[] = { '3', '-', '\r' };
+        ax25_send(fd, PID_CE, rel, 3);
+    }
 
     const char *port_name = (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports)
                             ? g_cfg.ports[g_port_idx].name
                             : g_cfg.port_name;
-    LOG_INF("send_own_routes: port=%s advertised %s SSID %d-%d RTT=1%s",
-            port_name, base, min_ssid, max_ssid,
-            include_request_token ? " (with request token)" : " (reply, no request token)");
+    const char *mode_str = (mode == SEND_ROUTES_RECORD_ONLY) ? "record only (refresh)"
+                         : (mode == SEND_ROUTES_REPLY_CLOSE) ? "record + '3-' (reply)"
+                         :                                     "full '3+'/record/'3-'";
+    LOG_INF("send_own_routes: port=%s advertised %s SSID %d-%d RTT=1 [%s]",
+            port_name, base, min_ssid, max_ssid, mode_str);
     return 0;
 }
 
@@ -432,7 +451,11 @@ static int run_native_ce_session(int fd)
                 LOG_DBG("run_native_ce_session: periodic route re-advert "
                         "(%lds since last)",
                         (long)(now - last_routes_tx));
-                send_own_routes(fd, 1);   /* WE initiate → include '3+' */
+                /* M6.9.4: record-only refresh.  No '3+' (peer state may
+                 * not be 0 → would trigger DM).  No '3-' either (no
+                 * state transition to signal).  The bare compact record
+                 * is processed unconditionally by peer. */
+                send_own_routes(fd, SEND_ROUTES_RECORD_ONLY);
                 last_routes_tx = now;
             }
 
@@ -601,8 +624,12 @@ static int run_native_ce_session(int fd)
              * initiate the route advertisement ourselves. */
             if (!sent_routes && got_peer_init && got_setup) {
                 LOG_INF("run_native_ce_session: link stable — "
-                        "sending our routes");
-                send_own_routes(fd, 1);   /* WE initiate → include '3+' */
+                        "sending our routes (record-only, safe path)");
+                /* M6.9.4: record-only.  If peer will later send '3+',
+                 * our reactive handler will reply with record+'3-' to
+                 * close the peer-initiated exchange properly.  If peer
+                 * never sends '3+', our record is already in its table. */
+                send_own_routes(fd, SEND_ROUTES_RECORD_ONLY);
                 sent_routes    = 1;
                 last_routes_tx = time(NULL);   /* M6.7: seed re-advert timer */
             }
@@ -828,7 +855,7 @@ static int run_native_ce_session(int fd)
                  * the M6.7 re-advert timer doesn't fire redundantly. */
                 LOG_INF("run_native_ce_session: '3+' received from peer "
                         "— replying with records + '3-' (no '3+' echo)");
-                send_own_routes(fd, 0);            /* reply → NO '3+' */
+                send_own_routes(fd, SEND_ROUTES_REPLY_CLOSE);  /* record + '3-' */
                 sent_routes    = 1;
                 last_routes_tx = time(NULL);
                 t_start = time(NULL);
