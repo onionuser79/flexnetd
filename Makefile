@@ -23,6 +23,14 @@ flexdest: flexdest.c
 	$(CC) $(CFLAGS_COMMON) -O2 -o $@ $<
 	@echo "Built flexdest" && ls -lh flexdest
 
+# tools/test_multi_bind: probe whether same-callsign-multi-port binding works.
+# Used to settle M6 (multi-neighbor) architecture choice.
+# Build with: `make test_multi_bind` — run with sudo.
+test_multi_bind: tools/test_multi_bind.c
+	$(CC) $(CFLAGS_COMMON) -O2 -o tools/test_multi_bind tools/test_multi_bind.c $(LDFLAGS)
+	@echo "Built tools/test_multi_bind — run with: sudo ./tools/test_multi_bind"
+	@ls -lh tools/test_multi_bind
+
 # Debug: symbols, no sanitisers — safe to run with sudo/root on aarch64
 debug: $(SRCS) flexnetd.h
 	$(CC) $(CFLAGS_COMMON) -g3 -O0 -DDEBUG -o $(TARGET)_debug $(SRCS) $(LDFLAGS)
@@ -61,7 +69,7 @@ install: $(TARGET) flexdest
 	else echo "Skipped $(CONFDIR)/flexnetd.conf (exists)"; fi
 
 clean:
-	rm -f $(TARGET) $(TARGET)_debug $(TARGET)_asan flexdest *.o
+	rm -f $(TARGET) $(TARGET)_debug $(TARGET)_asan flexdest tools/test_multi_bind *.o
 	@echo "Cleaned"
 
-.PHONY: all debug asan syntax check-deps install clean
+.PHONY: all debug asan syntax check-deps install clean test_multi_bind
