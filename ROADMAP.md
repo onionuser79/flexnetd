@@ -159,15 +159,50 @@ add a second port to peer with IW2OHX-12 (PCFlexnet), we gain:
 - **Unlocks M2.1** — cross-port transit becomes meaningful when there
   are two ports to forward between
 
+**Kernel binding constraint — resolved (2026-04-19):**
+
+The question "can we bind the same listen callsign (e.g. IW2OHX-3)
+to multiple AX.25 ports at once?" was settled empirically with
+`tools/test_multi_bind`:
+
+```
+[1] bind IW2OHX-3 on ax1 (SO_BINDTODEVICE=ax1)  → PASS fd=3
+[2] bind IW2OHX-3 on ax2 (SO_BINDTODEVICE=ax2)  → PASS fd=4
+[3] listen() on both                            → PASS
+VERDICT: multi-port same-callsign binding WORKS with SO_BINDTODEVICE.
+```
+
+Linux AX.25 `ax25_bind()` uniqueness check is (callsign + device +
+socket type), so different devices coexist fine as long as each
+socket is pinned with `SO_BINDTODEVICE`. **→ architecture A** is
+the way forward.
+
+**Architecture A (confirmed):**
+
+```
+flexnetd single process, no fork at accept level
+  ├─ listen_fd[0]  bind(CALL) + SO_BINDTODEVICE(port_0)
+  ├─ listen_fd[1]  bind(CALL) + SO_BINDTODEVICE(port_1)
+  └─ select() across all listen_fd[]; on ready → accept()
+          ├─ peer == configured_neighbor[N]  → fork CE/CF handler
+          └─ peer == anything else           → fork+exec uronode
+```
+
 **What's needed:**
 
 | Task | Description | Complexity |
 |------|-------------|------------|
-| **M6.1 Config: multiple neighbors** | Parse N `Neighbor` entries with their PortName, FlexListenCall, SSID range | Low |
-| **M6.2 Per-neighbor CE state** | One `LinkStats` + CE session context per neighbor (array or list) | Medium |
-| **M6.3 Per-neighbor dtable merge** | Track origin neighbor on each `DestEntry`; merge preferring lowest RTT | Medium |
-| **M6.4 Accept dispatch** | Match accepted peer against any of N neighbors, route to correct handler | Low |
-| **M6.5 Output files** | Gateways file with multiple rows; destinations file with correct VIA per neighbor | Low |
+| **M6.1 Config: repeatable Port block** | New `Port <name> { Neighbor <call>; ListenCall <call>; ... }` syntax, array of `PortCfg` in `FlexConfig` | Low |
+| **M6.2 Multi-listener loop** | `ax25_listen()` once per configured port, `select()` across the array in `run_server()` | Low |
+| **M6.3 Accept dispatch** | Match accepted peer against the neighbor list for the port the accept came from; fork CE session or uronode accordingly | Low |
+| **M6.4 Per-neighbor CE state** | Each forked CE child already has its own session state; the parent doesn't need multi-state, so this is mostly arg-passing hygiene | Low |
+| **M6.5 Shared dtable via file-merge** | Children each write their own `destinations.<port>` and `gateways.<port>` snapshot, parent merges into the single production output file with `flock` to avoid torn reads | Medium |
+| **M6.6 Linkstats per neighbor** | `linkstats` file gains one row per active CE session (peer column becomes the key) | Low |
+
+Each child fork already has a private dtable today, which actually
+*helps* multi-neighbor: no shared-state locking needed inside the
+CE handler.  The only cross-child concern is the destinations file,
+solved by per-child snapshot + parent-side merge (M6.5).
 
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
 
