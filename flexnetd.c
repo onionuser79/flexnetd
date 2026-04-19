@@ -364,8 +364,10 @@ int main(int argc, char *argv[])
     if (ensure_output_dir(g_cfg.gateways_file)  < 0) return 1;
     if (ensure_output_dir(g_cfg.dest_file)      < 0) return 1;
     if (ensure_output_dir(g_cfg.linkstats_file) < 0) return 1;
+    if (g_cfg.paths_file[0] && ensure_output_dir(g_cfg.paths_file) < 0) return 1;
 
     dtable_init();
+    path_pending_init();
 
     if (run_as_daemon) daemonise();
 

@@ -1,6 +1,6 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.5.0** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.6.0** | Author: IW2OHX | License: GPL v3 | April 2026
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -718,6 +718,22 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.6.0 (2026-04-19)
+
+**M5 — Route path display:**
+- CE type-6 / type-7 path query protocol implemented
+  (Route REQUEST / REPLY — wire format decoded from PC/FlexNet binaries)
+- `ce_build_path_request` / `ce_build_path_reply` builders
+- `ce_parse_path_frame` parser for both directions
+- QSO correlation table tracks in-flight queries (timeout 30s)
+- Periodic eager probing: one destination per ~60s, round-robin
+- New cache file `/usr/local/var/lib/ax25/flex/paths` with format:
+  `<target> <kind> <n_hops> <unix_ts> <hop1> <hop2> ...`
+- New config option `PathsFile`
+- `flexdest -r` shows `*** route:` line from cache, or partial
+  fallback if no cache entry yet
+- Cleaned code comments of all RE-artifact references
 
 ### v0.5.0 (2026-04-14)
 

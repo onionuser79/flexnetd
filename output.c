@@ -1,10 +1,11 @@
 /*
- * output.c — write URONode flex files
+ * output.c — write flex state files
  *
- * Produces three files that URONode reads for FlexNet information:
+ * Produces files that URONode and flexdest read for FlexNet information:
  *   /usr/local/var/lib/ax25/flex/gateways       — neighbor gateway
  *   /usr/local/var/lib/ax25/flex/destinations    — destination table
  *   /usr/local/var/lib/ax25/flex/linkstats       — link health (L-table)
+ *   /usr/local/var/lib/ax25/flex/paths           — path query cache (M5.3)
  *
  * Writes atomically via temp file + rename().
  *
@@ -17,9 +18,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include "flexnetd.h"
 
 LinkStats g_link_stats;
+
+/* Path cache — in-memory table, flushed to disk on every change */
+static PathCacheEntry g_path_cache[CE_PATH_MAX_CACHE];
+static int            g_path_cache_count = 0;
 
 int output_write_gateways(void)
 {
@@ -215,5 +221,122 @@ int output_write_linkstats(void)
             g_link_stats.dst_count, g_link_stats.qt,
             g_link_stats.rtt_last, g_link_stats.rtt_smoothed,
             dur, tx_str, rx_str);
+    return 0;
+}
+
+/* ── Path cache (CE type-7 reply cache) ─────────────────────────────── */
+/*
+ * The cache is an in-memory ring of recent replies, flushed to a text
+ * file so the standalone `flexdest` tool can read it.  Old entries
+ * beyond CE_PATH_CACHE_TTL_SEC are pruned on each insert.
+ *
+ * File format (one line per cached path):
+ *   <target> <kind> <n_hops> <unix_ts> <hop1> <hop2> ... <hopN>
+ *
+ * <kind> is 'R' for Route or 'T' for Traceroute.
+ */
+static void path_cache_prune(void)
+{
+    time_t now = time(NULL);
+    int out = 0;
+    for (int i = 0; i < g_path_cache_count; i++) {
+        if ((now - g_path_cache[i].cached) <= CE_PATH_CACHE_TTL_SEC) {
+            if (out != i) g_path_cache[out] = g_path_cache[i];
+            out++;
+        }
+    }
+    if (out < g_path_cache_count) {
+        LOG_DBG("path_cache_prune: dropped %d stale entries",
+                g_path_cache_count - out);
+    }
+    g_path_cache_count = out;
+}
+
+int output_write_paths_cache_add(const PathReply *r)
+{
+    if (!r || r->hop_callsign_count <= 0) return -1;
+
+    path_cache_prune();
+
+    /* last hop in the reply is the target (the destination we asked
+     * about) — look it up and either update or insert. */
+    const char *target = r->hop_callsigns[r->hop_callsign_count - 1];
+    int slot = -1;
+    for (int i = 0; i < g_path_cache_count; i++) {
+        if (strcasecmp(g_path_cache[i].target, target) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (g_path_cache_count >= CE_PATH_MAX_CACHE) {
+            /* evict oldest entry */
+            int oldest = 0;
+            for (int i = 1; i < g_path_cache_count; i++) {
+                if (g_path_cache[i].cached < g_path_cache[oldest].cached)
+                    oldest = i;
+            }
+            slot = oldest;
+        } else {
+            slot = g_path_cache_count++;
+        }
+    }
+
+    memset(&g_path_cache[slot], 0, sizeof(PathCacheEntry));
+    snprintf(g_path_cache[slot].target, MAX_CALLSIGN_LEN, "%s", target);
+    g_path_cache[slot].kind   = r->kind;
+    g_path_cache[slot].cached = r->received;
+    int n = r->hop_callsign_count;
+    if (n > CE_PATH_MAX_HOPS) n = CE_PATH_MAX_HOPS;
+    g_path_cache[slot].hop_callsign_count = n;
+    for (int i = 0; i < n; i++) {
+        snprintf(g_path_cache[slot].hop_callsigns[i], MAX_CALLSIGN_LEN,
+                 "%s", r->hop_callsigns[i]);
+    }
+
+    LOG_INF("output_write_paths_cache_add: target=%s kind=%c hops=%d",
+            target,
+            r->kind == CE_PATH_KIND_TRACE ? 'T' : 'R',
+            n);
+    return output_write_paths_cache_flush();
+}
+
+int output_write_paths_cache_flush(void)
+{
+    if (!g_cfg.paths_file[0]) return 0;
+
+    char tmp[MAX_PATH_LEN + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", g_cfg.paths_file);
+
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        LOG_ERR("output_write_paths_cache_flush: cannot open '%s': %s",
+                tmp, strerror(errno));
+        return -1;
+    }
+
+    fprintf(f, "# flexnetd path cache — target kind n_hops unix_ts hops...\n");
+    for (int i = 0; i < g_path_cache_count; i++) {
+        const PathCacheEntry *e = &g_path_cache[i];
+        fprintf(f, "%s %c %d %ld",
+                e->target,
+                e->kind == CE_PATH_KIND_TRACE ? 'T' : 'R',
+                e->hop_callsign_count,
+                (long)e->cached);
+        for (int k = 0; k < e->hop_callsign_count; k++)
+            fprintf(f, " %s", e->hop_callsigns[k]);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+
+    if (rename(tmp, g_cfg.paths_file) < 0) {
+        LOG_ERR("output_write_paths_cache_flush: rename failed: %s",
+                strerror(errno));
+        unlink(tmp);
+        return -1;
+    }
+
+    LOG_DBG("output_write_paths_cache_flush: wrote %d paths to %s",
+            g_path_cache_count, g_cfg.paths_file);
     return 0;
 }

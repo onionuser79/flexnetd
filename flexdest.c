@@ -9,8 +9,11 @@
  *   flexdest IR5S         — exact callsign match
  *   flexdest IW*          — prefix wildcard (all starting with IW)
  *   flexdest IR5S-7       — SSID-specific (entries containing SSID 7)
+ *   flexdest -r IR5S      — also show route path (from path cache)
  *
- * Reads: /usr/local/var/lib/ax25/flex/destinations (or -f <file>)
+ * Reads:
+ *   /usr/local/var/lib/ax25/flex/destinations (-f <file> to override)
+ *   /usr/local/var/lib/ax25/flex/paths        (-p <file> to override)
  *
  * Author: IW2OHX, April 2026
  * License: GPL v3
@@ -20,11 +23,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 
-#define DEFAULT_DEST_FILE  "/usr/local/var/lib/ax25/flex/destinations"
-#define MAX_LINE           256
-#define MAX_CALL           10
-#define MAX_ENTRIES        2000
+#define DEFAULT_DEST_FILE   "/usr/local/var/lib/ax25/flex/destinations"
+#define DEFAULT_PATHS_FILE  "/usr/local/var/lib/ax25/flex/paths"
+#define MAX_LINE            1024
+#define MAX_CALL            10
+#define MAX_ENTRIES         2000
+#define MAX_PATH_HOPS       16
 
 typedef struct {
     char  callsign[MAX_CALL];
@@ -127,7 +133,7 @@ static int match_pattern(const DestEntry *e, const char *pattern)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s [-f file] [pattern]\n"
+        "Usage: %s [-f file] [-p file] [-r] [pattern]\n"
         "\n"
         "Query FlexNet destinations with pattern matching.\n"
         "\n"
@@ -138,19 +144,127 @@ static void usage(const char *prog)
         "  (none)     list all destinations\n"
         "\n"
         "Options:\n"
-        "  -f file    destinations file (default: %s)\n",
-        prog, DEFAULT_DEST_FILE);
+        "  -f file    destinations file (default: %s)\n"
+        "  -p file    path cache file   (default: %s)\n"
+        "  -r         show route path after each matched destination\n"
+        "             (reads the path cache populated by flexnetd from\n"
+        "              CE type-7 replies)\n",
+        prog, DEFAULT_DEST_FILE, DEFAULT_PATHS_FILE);
+}
+
+/*
+ * Path cache entry — one line from the paths file.
+ * File format (space-separated, # comment):
+ *   <target> <kind_char> <n_hops> <unix_ts> <hop1> <hop2> ... <hopN>
+ * kind_char: 'R' = Route, 'T' = Traceroute
+ */
+typedef struct {
+    char  target[MAX_CALL];
+    char  kind;
+    int   n_hops;
+    long  cached_ts;
+    char  hops[MAX_PATH_HOPS][MAX_CALL];
+} PathCache;
+
+static PathCache g_cache[MAX_ENTRIES];
+static int       g_cache_count = 0;
+
+/* Load path cache file.  Returns count of entries loaded, or -1 on error. */
+static int load_paths_cache(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;  /* silent — cache may not exist yet */
+
+    char line[MAX_LINE];
+    g_cache_count = 0;
+    while (fgets(line, sizeof(line), f) && g_cache_count < MAX_ENTRIES) {
+        /* trim newline */
+        char *nl = strpbrk(line, "\r\n");
+        if (nl) *nl = '\0';
+        if (line[0] == '#' || line[0] == '\0') continue;
+
+        PathCache *e = &g_cache[g_cache_count];
+        memset(e, 0, sizeof(*e));
+
+        /* scanf up to the fixed header: target kind_char n_hops ts */
+        char kind = '?';
+        int  n_hops = 0;
+        long ts = 0;
+        int  consumed = 0;
+        if (sscanf(line, "%9s %c %d %ld %n",
+                   e->target, &kind, &n_hops, &ts, &consumed) < 4) {
+            continue;
+        }
+        str_upper(e->target);
+        e->kind      = kind;
+        e->n_hops    = n_hops;
+        e->cached_ts = ts;
+
+        /* remaining tokens are the hops */
+        int hi = 0;
+        char *p = line + consumed;
+        char *tok = strtok(p, " \t");
+        while (tok && hi < MAX_PATH_HOPS && hi < n_hops) {
+            snprintf(e->hops[hi++], MAX_CALL, "%s", tok);
+            tok = strtok(NULL, " \t");
+        }
+        e->n_hops = hi;
+        g_cache_count++;
+    }
+    fclose(f);
+    return g_cache_count;
+}
+
+/* Find the cached path for a given destination callsign.
+ * Returns pointer into g_cache, or NULL if not found. */
+static const PathCache *find_cached_path(const char *dest_call)
+{
+    if (!dest_call || !dest_call[0]) return NULL;
+    for (int i = 0; i < g_cache_count; i++) {
+        if (strcasecmp(g_cache[i].target, dest_call) == 0)
+            return &g_cache[i];
+        /* also match if the cached target has an SSID that matches
+         * the query (e.g. cache has "IR5S-3", query was "IR5S") */
+        char base[MAX_CALL];
+        snprintf(base, sizeof(base), "%s", g_cache[i].target);
+        char *dash = strchr(base, '-');
+        if (dash) {
+            *dash = '\0';
+            if (strcasecmp(base, dest_call) == 0)
+                return &g_cache[i];
+        }
+    }
+    return NULL;
+}
+
+/* Render human-friendly age for cache entry */
+static void fmt_age(long seconds, char *buf, int buflen)
+{
+    if (seconds < 60)
+        snprintf(buf, buflen, "%lds", seconds);
+    else if (seconds < 3600)
+        snprintf(buf, buflen, "%ldm%02lds", seconds / 60, seconds % 60);
+    else
+        snprintf(buf, buflen, "%ldh%02ldm", seconds / 3600,
+                 (seconds % 3600) / 60);
 }
 
 int main(int argc, char *argv[])
 {
-    const char *dest_file = DEFAULT_DEST_FILE;
-    const char *pattern   = NULL;
+    const char *dest_file  = DEFAULT_DEST_FILE;
+    const char *paths_file = DEFAULT_PATHS_FILE;
+    const char *pattern    = NULL;
+    int         show_route = 0;
 
     /* parse args */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
             dest_file = argv[++i];
+        } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            paths_file = argv[++i];
+        } else if (strcmp(argv[i], "-r") == 0 ||
+                   strcmp(argv[i], "--route") == 0) {
+            show_route = 1;
         } else if (strcmp(argv[i], "-h") == 0 ||
                    strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
@@ -184,6 +298,11 @@ int main(int argc, char *argv[])
     }
     fclose(f);
 
+    /* Optional: load path cache (silently tolerate missing file) */
+    if (show_route) {
+        load_paths_cache(paths_file);
+    }
+
     if (count == 0) {
         if (pattern)
             printf("FlexNet: no destinations matching '%s'\n", pattern);
@@ -208,6 +327,7 @@ int main(int argc, char *argv[])
 
     printf("Dest     SSID    RTT Via\n");
 
+    time_t now = time(NULL);
     for (int i = 0; i < count; i++) {
         DestEntry *e = &matches[i];
         char ssid_range[12];
@@ -216,6 +336,31 @@ int main(int argc, char *argv[])
         printf("%-9s %-5s %5d %-9s\n",
                e->callsign, ssid_range, e->rtt,
                e->via[0] ? e->via : "(direct)");
+
+        /* Optional: route line from the path cache */
+        if (show_route) {
+            const PathCache *pc = find_cached_path(e->callsign);
+            if (pc && pc->n_hops > 0) {
+                char age_buf[16];
+                fmt_age(now - pc->cached_ts, age_buf, sizeof(age_buf));
+                printf("*** route:");
+                for (int k = 0; k < pc->n_hops; k++)
+                    printf(" %s", pc->hops[k]);
+                printf("   [%s %s ago]\n",
+                       pc->kind == 'T' ? "trace" : "route",
+                       age_buf);
+            } else {
+                /* no cached full path — fall back to partial route
+                 * from destinations file (our_call unknown, so show
+                 * what we know: via_callsign -> destination) */
+                if (e->via[0])
+                    printf("*** route: ... %s %s   [no cache; run a "
+                           "route query to populate]\n",
+                           e->via, e->callsign);
+                else
+                    printf("*** route: %s   [no cache]\n", e->callsign);
+            }
+        }
     }
 
     printf("\n%d destination%s\n", count, count == 1 ? "" : "s");

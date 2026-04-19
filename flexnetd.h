@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.5.0"
+#define FLEXNETD_VERSION        "0.6.0"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -62,8 +62,24 @@
 #define CE_FRAME_COMPACT        5   /* '3' prefix — compact route record */
 #define CE_FRAME_LINK_TIME      6   /* '1' prefix — link time (ms)       */
 #define CE_FRAME_TOKEN          7   /* '4' prefix — token/sequence       */
-#define CE_FRAME_DEST_BCAST     8   /* '6' prefix — destination broadcast*/
+#define CE_FRAME_DEST_BCAST     8   /* '6' prefix — legacy (deprecated)  */
 #define CE_FRAME_INIT           9   /* '0' prefix — initial handshake    */
+#define CE_FRAME_PATH_REQUEST   10  /* '6' prefix — Route/Trace REQUEST  */
+#define CE_FRAME_PATH_REPLY     11  /* '7' prefix — Route/Trace REPLY    */
+
+/* ── Path query protocol constants ──────────────────────────────────── */
+#define CE_PATH_MAX_HOPS        16       /* hard cap on per-reply hops    */
+#define CE_PATH_QSO_FIELD_LEN   5        /* "%5u" 5-byte correlator       */
+#define CE_PATH_HOP_BYTE_BASE   0x20     /* ASCII offset for HopCount     */
+#define CE_PATH_TRACE_BIT       0x40     /* bit in QSO[0] = Traceroute    */
+#define CE_PATH_MAX_PENDING     16       /* in-flight queries we track    */
+#define CE_PATH_TIMEOUT_SEC     30       /* pending query expiry          */
+#define CE_PATH_CACHE_TTL_SEC   300      /* path cache freshness          */
+#define CE_PATH_MAX_CACHE       256      /* cached reply buffer entries   */
+
+/* Path kinds (bit 0x40 of QSO[0]) */
+#define CE_PATH_KIND_ROUTE      0        /* bit clear = Route             */
+#define CE_PATH_KIND_TRACE      1        /* bit set   = Traceroute        */
 
 /* ── Log levels ───────────────────────────────────────────────────────── */
 #define LOG_LEVEL_NONE          0
@@ -108,6 +124,7 @@ typedef struct {
     char    gateways_file[MAX_PATH_LEN];
     char    dest_file[MAX_PATH_LEN];
     char    linkstats_file[MAX_PATH_LEN];
+    char    paths_file[MAX_PATH_LEN];       /* cache file for D/trace replies */
     int     log_level;
     int     use_syslog;
     int     probe_count;
@@ -156,6 +173,38 @@ typedef struct {
 } LinkStats;
 
 extern LinkStats g_link_stats;
+
+/* ── Path query types (M5.3 — CE type-6/7) ──────────────────────────── */
+
+/* Parsed type-7 reply */
+typedef struct {
+    int   qso;                                    /* decoded QSO id      */
+    int   kind;                                   /* CE_PATH_KIND_*      */
+    int   hop_count;                              /* from HOP_BYTE       */
+    int   hop_callsign_count;                     /* actual callsigns    */
+    char  hop_callsigns[CE_PATH_MAX_HOPS][MAX_CALLSIGN_LEN];
+    time_t received;                              /* wall clock time     */
+} PathReply;
+
+/* Pending query (outstanding type-6 awaiting type-7) */
+typedef struct {
+    int    qso;                                   /* correlator          */
+    int    kind;                                  /* CE_PATH_KIND_*      */
+    char   target[MAX_CALLSIGN_LEN];              /* destination queried */
+    time_t sent;                                  /* when request left   */
+    int    active;                                /* 1 = in-flight, 0 = free */
+} PathPending;
+
+/* Cached reply (written to disk for flexdest consumption) */
+typedef struct {
+    char       target[MAX_CALLSIGN_LEN];
+    int        kind;
+    int        hop_callsign_count;
+    char       hop_callsigns[CE_PATH_MAX_HOPS][MAX_CALLSIGN_LEN];
+    time_t     cached;
+} PathCacheEntry;
+
+extern PathPending g_path_pending[CE_PATH_MAX_PENDING];
 
 /* ── Function declarations ───────────────────────────────────────────── */
 /* flexnetd_log declared above with __attribute__((format)) */
@@ -213,6 +262,59 @@ int ce_parse_dest_broadcast(const uint8_t *data, int len,
                             int *rtt_out, char *callsign_out,
                             int *ssid_lo_out, int *ssid_hi_out,
                             char *via_callsign_out, char *flag_out);
+
+/* ── Path query (CE type-6 request / type-7 reply) ─────────────────── */
+/*
+ * ce_build_path_request — build a type-6 Route or Traceroute REQUEST.
+ *
+ * Wire format:
+ *   '6' HOP_BYTE QSO_FIELD(5) ORIGIN ' ' TARGET
+ *   HOP_BYTE = CE_PATH_HOP_BYTE_BASE + hop_count
+ *   QSO_FIELD = sprintf("%5u", qso); if kind==TRACE, QSO_FIELD[0] |= 0x40
+ *
+ * Returns bytes written, -1 on error.
+ */
+int ce_build_path_request(uint8_t *buf, int buflen,
+                          int qso, int kind,
+                          const char *origin_call,
+                          const char *target_call);
+
+/*
+ * ce_build_path_reply — build a type-7 reply with an accumulated hop list.
+ *
+ * Wire format:
+ *   '7' HOP_BYTE QSO_FIELD(5) ' ' HOP_1 ' ' HOP_2 ... HOP_N
+ *
+ * hops[] and n_hops provide the accumulated path.  HOP_BYTE is derived
+ * from n_hops.  Returns bytes written, -1 on error.
+ */
+int ce_build_path_reply(uint8_t *buf, int buflen,
+                        int qso, int kind,
+                        const char *const *hops, int n_hops);
+
+/*
+ * ce_parse_path_frame — parse a type-6 or type-7 frame.
+ *
+ * On success populates *reply_out for type-7 or the request-specific
+ * outputs for type-6.  Returns CE_FRAME_PATH_REQUEST, CE_FRAME_PATH_REPLY,
+ * or -1.
+ */
+int ce_parse_path_frame(const uint8_t *data, int len,
+                        PathReply *reply_out,
+                        int *qso_out, int *kind_out, int *hop_count_out,
+                        char *origin_out, char *target_out);
+
+/* ── Path pending-query table ──────────────────────────────────────── */
+void path_pending_init(void);
+int  path_pending_add(int qso, int kind, const char *target);
+int  path_pending_find(int qso);
+void path_pending_remove(int qso);
+void path_pending_sweep(void);
+int  path_pending_next_qso(void);
+
+/* ── Path cache ────────────────────────────────────────────────────── */
+int output_write_paths_cache_add(const PathReply *r);
+int output_write_paths_cache_flush(void);
 
 void dtable_init(void);
 int  dtable_find(const char *callsign, int ssid_lo, int ssid_hi);

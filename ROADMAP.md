@@ -72,30 +72,28 @@ Outbound FlexNet connects include our node in the AX.25 digipeater via-list.
 
 ---
 
-## What's remaining
+### v0.6.0 — M5: Route path display (2026-04-19)
 
-### v0.6.0 — M5: Route path display (NEXT)
+Route trace output per-destination, produced by the peer-to-peer
+path query protocol (CE type-6 REQUEST / type-7 REPLY).
 
-**Goal:** Show the hop-by-hop route path for FlexNet destinations, like
-xnet's route trace output:
-```
-d iw2ohx-3     (on IR3UHF)
-*** route: IR3UHF IZ3LSV-14 IR3UHU-2 IW2OHX-14 IW2OHX-3
-```
-
-**What we have today:** Each `DestEntry` carries `via_callsign` — the
-next hop from xnet's perspective. This gives us a partial path:
-`IW2OHX-3 → IW2OHX-14 → [via] → destination`.
-
-**What's needed:**
-
-| Task | Description | Complexity |
-|------|-------------|------------|
-| **M5.1 Partial route** | Show known path from local data: `route: <me> <neighbor> [via_callsign] DEST` | Low |
-| **M5.2 Path chaining** | (Dropped — each `via_callsign` is an independent next-hop and does not chain) | — |
-| **M5.3 CE type-6/7 path query** | Send type-6 REQUEST, collect type-7 REPLY with accumulated hop list. Wire format fully decoded. | Medium |
-
-Type-6/7 wire format is documented in `PROTOCOL_SPEC.md` §CE type-6/7.
+- **M5.3 Full path via CE type-6/7** — implemented.
+  - `ce_build_path_request` / `ce_build_path_reply`
+  - `ce_parse_path_frame`
+  - pending query table with QSO correlation and 30-second timeout
+  - periodic eager probing: one destination per ~60s (round-robin)
+  - path cache file (`/usr/local/var/lib/ax25/flex/paths`)
+- **flexdest `-r`** flag reads the cache and prints a line after each
+  matched destination:
+  ```
+  IR5S      0-15     4 IR3UHU-2
+  *** route: IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S   [route 3m42s ago]
+  ```
+- Type-6/7 wire format (fully decoded and documented in
+  `PROTOCOL_SPEC.md`):
+  `TYPE + HopCount_byte(0x20+N) + QSO_field(5 bytes, "%5u") + callsigns`
+- M5.1/M5.2 (local partial route) remain as fallback when the cache
+  doesn't yet have an entry for the requested destination.
 
 ### v0.7.0 — M6: Multi-neighbor support (prerequisite for M2.1)
 
@@ -188,8 +186,8 @@ confirmed wire protocol.
 | v0.4.0 | Protocol correctness (SSID, init, L3RTT) + debug logging | **Released** |
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
 | v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
-| v0.6.0 | M5 — Route path display (like xnet's `*** route:` output) | **Next** |
-| v0.7.0 | M6 — Multi-neighbor support (xnet + PCFlexnet ports) | Planned |
+| v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Released** |
+| v0.7.0 | M6 — Multi-neighbor support (two FlexNet ports) | Planned |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
