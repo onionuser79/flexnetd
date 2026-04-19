@@ -273,6 +273,7 @@ static int run_native_ce_session(int fd)
     int     probe_idx        = 0;   /* round-robin dtable index         */
     time_t  last_keepalive_tx = time(NULL);   /* proactive keepalive timer */
     time_t  last_routes_tx   = 0;      /* M6.7: last time we sent 3+/route/3- */
+    time_t  last_lt_tx       = 0;      /* M6.9: last time we sent a link-time frame */
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
@@ -330,14 +331,42 @@ static int run_native_ce_session(int fd)
                 g_link_stats.tx_bytes += CE_KEEPALIVE_LEN;
                 g_link_stats.tx_frames++;
 
-                uint8_t lt_buf[32];
-                int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
-                if (lt_len > 0) {
-                    ax25_send(fd, PID_CE, lt_buf, lt_len);
-                    g_link_stats.tx_bytes += lt_len;
-                    g_link_stats.tx_frames++;
-                    clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
-                    lt_sent_pending = 1;
+                /* M6.9: rate-limit link-time frames.
+                 *
+                 * PCFlexnet sets its internal expected-reply timestamp to
+                 *   link.ts = now + (smoothed+4)*32   (if smoothed < 96)
+                 *   link.ts = now + 3200              (otherwise)
+                 * (from RE of flxnod32.dll @ 0x100062FF)
+                 *
+                 * Ticks are 100ms, so that's now + 12.8s  to  now + 320s.
+                 * If our link-time arrives BEFORE link.ts, PCFlexnet
+                 * computes delta = now - link.ts = NEGATIVE, which wraps
+                 * and clamps to 4095 (the 0xFFF cap at 0x10006F64).
+                 * That's exactly what we saw: pcf.delay saturates at 4095.
+                 *
+                 * xnet doesn't hit this because it initiates its own
+                 * link-time exchanges on its cycle.  PCFlexnet only
+                 * replies — so WE must respect the interval. */
+                if (g_cfg.lt_reply_interval <= 0 ||
+                    now - last_lt_tx >= g_cfg.lt_reply_interval)
+                {
+                    uint8_t lt_buf[32];
+                    int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
+                    if (lt_len > 0) {
+                        ax25_send(fd, PID_CE, lt_buf, lt_len);
+                        g_link_stats.tx_bytes += lt_len;
+                        g_link_stats.tx_frames++;
+                        clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                        lt_sent_pending = 1;
+                        last_lt_tx = now;
+                        LOG_DBG("run_native_ce_session: proactive link-time "
+                                "sent (interval=%ds)", g_cfg.lt_reply_interval);
+                    }
+                } else {
+                    LOG_DBG("run_native_ce_session: skipping proactive "
+                            "link-time (only %lds since last, "
+                            "need >= %ds)",
+                            (long)(now - last_lt_tx), g_cfg.lt_reply_interval);
                 }
                 last_keepalive_tx = now;
             }
@@ -503,20 +532,31 @@ static int run_native_ce_session(int fd)
             /* Reset proactive-keepalive timer — we just sent one. */
             last_keepalive_tx = time(NULL);
 
-            /* Send link time on every keepalive cycle so the peer can
-             * converge its smoothed RTT.  Without this, Q/T stays
-             * frozen at 301 and rtt at 600/2 indefinitely. */
+            /* M6.9: rate-limit link-time sends (see 20s-timer comment).
+             * PCFlexnet's ts-ahead logic causes our fast replies to produce
+             * a negative delta that clamps to 4095.  Wait until the
+             * configured interval has elapsed. */
             {
-                uint8_t lt_buf[32];
-                int lt_len = ce_build_link_time(lt_buf,
-                                (int)sizeof(lt_buf), 2);
-                if (lt_len > 0) {
-                    ax25_send(fd, PID_CE, lt_buf, lt_len);
-                    g_link_stats.tx_bytes += lt_len;
-                    g_link_stats.tx_frames++;
-                    /* Record send time for RTT measurement */
-                    clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
-                    lt_sent_pending = 1;
+                time_t now = time(NULL);
+                if (g_cfg.lt_reply_interval <= 0 ||
+                    now - last_lt_tx >= g_cfg.lt_reply_interval)
+                {
+                    uint8_t lt_buf[32];
+                    int lt_len = ce_build_link_time(lt_buf,
+                                    (int)sizeof(lt_buf), 2);
+                    if (lt_len > 0) {
+                        ax25_send(fd, PID_CE, lt_buf, lt_len);
+                        g_link_stats.tx_bytes += lt_len;
+                        g_link_stats.tx_frames++;
+                        clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                        lt_sent_pending = 1;
+                        last_lt_tx = now;
+                    }
+                } else {
+                    LOG_DBG("run_native_ce_session: skipping link-time "
+                            "after peer keepalive (only %lds since last, "
+                            "need >= %ds)",
+                            (long)(now - last_lt_tx), g_cfg.lt_reply_interval);
                 }
             }
 
@@ -592,21 +632,39 @@ static int run_native_ce_session(int fd)
                 /* Q/T = 1 for direct link (always) */
                 g_link_stats.qt = 1;
 
-                /* Reply with our own link time EVERY time.
-                 * The peer uses exponential smoothing — it needs repeated
-                 * measurements to converge from the initial 600
-                 * (RTT_INFINITY) toward the actual value. */
-                uint8_t lt_buf[32];
-                int lt_len = ce_build_link_time(lt_buf,
-                                (int)sizeof(lt_buf), 2);
-                if (lt_len > 0) {
-                    ax25_send(fd, PID_CE, lt_buf, lt_len);
-                    g_link_stats.tx_bytes += lt_len;
-                    g_link_stats.tx_frames++;
-                    /* Also record this send for next RTT measurement */
-                    clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
-                    lt_sent_pending = 1;
-                    LOG_DBG("run_native_ce_session: sent link time = 2");
+                /* M6.9: rate-limit our link-time reply.
+                 *
+                 * Earlier code replied with "1 2\r" to EVERY peer link-time.
+                 * For PCFlexnet that triggers the timeout path in flxnod32.dll
+                 * (smoothed saturates at 4095) because PCFlexnet expects the
+                 * next link-time at now + (smoothed+4)*32 ticks, not within
+                 * milliseconds.  See 0x100062FF in flxnod32.dll.
+                 *
+                 * Minimum interval configurable via LinkTimeReplyInterval
+                 * (default 90s, matching FlexNet's documented poll period). */
+                time_t now_s = time(NULL);
+                if (g_cfg.lt_reply_interval <= 0 ||
+                    now_s - last_lt_tx >= g_cfg.lt_reply_interval)
+                {
+                    uint8_t lt_buf[32];
+                    int lt_len = ce_build_link_time(lt_buf,
+                                    (int)sizeof(lt_buf), 2);
+                    if (lt_len > 0) {
+                        ax25_send(fd, PID_CE, lt_buf, lt_len);
+                        g_link_stats.tx_bytes += lt_len;
+                        g_link_stats.tx_frames++;
+                        clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                        lt_sent_pending = 1;
+                        last_lt_tx = now_s;
+                        LOG_DBG("run_native_ce_session: sent link-time "
+                                "reply (interval=%ds)",
+                                g_cfg.lt_reply_interval);
+                    }
+                } else {
+                    LOG_DBG("run_native_ce_session: skipping link-time "
+                            "reply (only %lds since last, need >= %ds)",
+                            (long)(now_s - last_lt_tx),
+                            g_cfg.lt_reply_interval);
                 }
             }
             t_start = time(NULL);

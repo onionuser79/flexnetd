@@ -43,6 +43,7 @@ static void set_defaults(FlexConfig *cfg)
     cfg->probe_count          = DEFAULT_PROBE_COUNT;
     cfg->path_probe_interval  = CE_PATH_PROBE_SEC;
     cfg->route_advert_interval = DEFAULT_ROUTE_ADVERT_S;
+    cfg->lt_reply_interval    = DEFAULT_LT_REPLY_S;
 }
 
 int config_load(const char *path, FlexConfig *cfg)
@@ -126,6 +127,8 @@ int config_load(const char *path, FlexConfig *cfg)
             cfg->path_probe_interval = atoi(val);
         else if (!strcasecmp(key, "RouteAdvertInterval"))
             cfg->route_advert_interval = atoi(val);
+        else if (!strcasecmp(key, "LinkTimeReplyInterval"))
+            cfg->lt_reply_interval = atoi(val);
         else if (!strcasecmp(key, "Port")) {
             /* M6 multi-port syntax:
              *   Port <name> <neighbor> <listen_call>
@@ -222,6 +225,8 @@ void config_dump(const FlexConfig *cfg)
     LOG_INF("  PathProbeInterval : %d s", cfg->path_probe_interval);
     LOG_INF("  RouteAdvertInterval: %d s%s", cfg->route_advert_interval,
             cfg->route_advert_interval <= 0 ? " (once only)" : "");
+    LOG_INF("  LinkTimeReplyInterval: %d s%s", cfg->lt_reply_interval,
+            cfg->lt_reply_interval <= 0 ? " (no rate limit)" : "");
     LOG_INF("  LogLevel          : %d", cfg->log_level);
     LOG_INF("  Syslog            : %s", cfg->use_syslog ? "yes" : "no");
     LOG_INF("==============================");
