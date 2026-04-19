@@ -646,40 +646,27 @@ static int run_native_ce_session(int fd)
                 /* Q/T = 1 for direct link (always) */
                 g_link_stats.qt = 1;
 
-                /* M6.9: rate-limit our link-time reply.
+                /* M6.9.2: do NOT reply to the peer's link-time inline.
                  *
-                 * Earlier code replied with "1 2\r" to EVERY peer link-time.
-                 * For PCFlexnet that triggers the timeout path in flxnod32.dll
-                 * (smoothed saturates at 4095) because PCFlexnet expects the
-                 * next link-time at now + (smoothed+4)*32 ticks, not within
-                 * milliseconds.  See 0x100062FF in flxnod32.dll.
+                 * The previous code replied whenever the rate-limit gate
+                 * was open.  Problem: the reply fires on peer-frame arrival
+                 * timing (arbitrary phase), so even when 320s has elapsed
+                 * the actual send is a few seconds PAST the clean 320s
+                 * boundary.  That produces delta=~100 ticks at pcf
+                 * ("100" samples seen in its l * history alongside the
+                 * "1" samples from the proactive-path sends).
                  *
-                 * Minimum interval configurable via LinkTimeReplyInterval
-                 * (default 90s, matching FlexNet's documented poll period). */
-                time_t now_s = time(NULL);
-                if (g_cfg.lt_reply_interval <= 0 ||
-                    now_s - last_lt_tx >= g_cfg.lt_reply_interval)
-                {
-                    uint8_t lt_buf[32];
-                    int lt_len = ce_build_link_time(lt_buf,
-                                    (int)sizeof(lt_buf), 2);
-                    if (lt_len > 0) {
-                        ax25_send(fd, PID_CE, lt_buf, lt_len);
-                        g_link_stats.tx_bytes += lt_len;
-                        g_link_stats.tx_frames++;
-                        clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
-                        lt_sent_pending = 1;
-                        last_lt_tx = now_s;
-                        LOG_DBG("run_native_ce_session: sent link-time "
-                                "reply (interval=%ds)",
-                                g_cfg.lt_reply_interval);
-                    }
-                } else {
-                    LOG_DBG("run_native_ce_session: skipping link-time "
-                            "reply (only %lds since last, need >= %ds)",
-                            (long)(now_s - last_lt_tx),
-                            g_cfg.lt_reply_interval);
-                }
+                 * The proactive 20s timer sends at integer-second multiples,
+                 * so every 16th tick lands on a clean 320s boundary and
+                 * gives delta=0 -> stored as 1 (the min-clamp).  Removing
+                 * the reply-path means link-time goes out ONLY via the
+                 * proactive timer, producing a steady stream of "1" samples.
+                 *
+                 * g_link_stats.rtt_smoothed update above still runs, so
+                 * our own RTT estimate is unaffected.
+                 */
+                LOG_DBG("run_native_ce_session: peer link-time received, "
+                        "our reply deferred to proactive timer (M6.9.2)");
             }
             t_start = time(NULL);
             continue;
