@@ -1,6 +1,8 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.6.0** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.6.0 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
+
+[![stable](https://img.shields.io/badge/release-v0.6.0-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.6.0)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
