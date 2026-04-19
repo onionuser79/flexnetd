@@ -219,7 +219,7 @@ static int write_proc_param(const char *iface, const char *param, int value)
  *   t2_timeout = 50ms  (ack delay — default 3000ms is far too slow)
  *   standard_window_size = 7  (match axports config)
  *
- * This eliminates REJ frames caused by xnet retransmitting at ~70ms
+ * This eliminates REJ frames caused by the peer retransmitting at ~70ms
  * before the kernel sends RR with the default 3-second T2 delay.
  */
 int ax25_tune_interface(const char *port_name)
@@ -263,7 +263,7 @@ int ax25_tune_interface(const char *port_name)
 /* ── ax25_get_ifname ─────────────────────────────────────────────────── */
 /*
  * Resolve an axports port name to the kernel interface name.
- *   "xnet" → "IW2OHX-3" (via axports) → "ax1" (via /sys/class/net)
+ *   port_name → port_callsign (via axports) → kernel iface (via /sys/class/net)
  * Returns 0 on success, -1 on failure.
  */
 int ax25_get_ifname(const char *port_name, char *iface_out, int buflen)
@@ -410,12 +410,12 @@ int ax25_connect(const char *mycall, const char *neighbor,
 /*
  * Bind listen_call on the given axport and start listening.
  *
- * listen_call should be the port's own callsign from axports
- * (e.g. IW2OHX-3 for xnet). This matches the interface address,
- * so bind() works natively with SO_BINDTODEVICE.
+ * listen_call should be the port's own callsign from axports.
+ * This matches the interface address, so bind() works natively
+ * with SO_BINDTODEVICE.
  *
  * listen_call MUST NOT be in ax25d.conf — flexnetd owns it.
- * Configure Xnet: ro flexnet add xnet <listen_call>
+ * On the peer, configure: ro flexnet add <port_name> <listen_call>
  *
  * Returns listen_fd >= 0 on success, -1 on error.
  */

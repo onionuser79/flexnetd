@@ -2,12 +2,12 @@
  * flexnetd.c — FlexNet routing daemon
  *
  * SERVER MODE (Role server — default):
- *   Binds the xnet port callsign (IW2OHX-3) directly — no ax25d.
- *   [IW2OHX-3 VIA xnet] must be ABSENT from ax25d.conf.
+ *   Binds the listen callsign directly — no ax25d.
+ *   [<listen_call> VIA <port_name>] must be ABSENT from ax25d.conf.
  *   Dispatches by first-frame PID:
- *     pid=CE/CF -> native FlexNet session (IW2OHX-14 peering)
+ *     pid=CE/CF -> native FlexNet session (neighbor peering)
  *     pid=F0    -> fork+exec uronode (regular user sessions)
- *   Xnet config: ro flexnet add xnet IW2OHX-3
+ *   Peer config example: ro flexnet add <port_name> <listen_call>
  *
  * CLIENT MODE (Role client):
  *   Periodically connects to Neighbor, sends "d" command, parses
@@ -77,7 +77,7 @@ static int ensure_output_dir(const char *filepath)
 
 /* ── SERVER MODE ─────────────────────────────────────────────────────── */
 /*
- * Bind FlexListenCall (xnet port callsign, e.g. IW2OHX-3) directly.
+ * Bind FlexListenCall (the port's own callsign) directly.
  * Dispatch by first-frame PID:
  *   CE/CF -> native FlexNet session handler
  *   F0    -> fork + exec uronode
@@ -139,7 +139,7 @@ static int run_server(void)
          *
          * If the peer is our configured neighbor, this is a FlexNet
          * session — send a CE keepalive to kick-start the exchange
-         * (Xnet may wait for us to send first after a fresh L2 link).
+         * (the peer may wait for us to send first after a fresh L2 link).
          *
          * Otherwise, peek at the first byte to classify.
          */
@@ -160,7 +160,7 @@ static int run_server(void)
             if (slen > 0)
                 ax25_send(conn_fd, PID_CE, setup, slen);
             /* Send keepalive to kick-start the exchange —
-             * xnet waits for this before sending routing data */
+             * the peer waits for this before sending routing data */
             send_ce_keepalive(conn_fd);
             first_pid = PID_CE;  /* treat as FlexNet session */
         } else {
