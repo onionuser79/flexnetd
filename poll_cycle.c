@@ -187,9 +187,27 @@ static int ce_send_init_response(int fd)
 /*
  * send_own_routes — advertise our local destinations to the peer.
  *
- * Sends:  3+\r  (request token)
- *         3<CALL><SSID_LO><SSID_HI><RTT> \r  (our route)
- *         3-\r  (release token)
+ * When include_request_token is non-zero:
+ *   3+\r                                       (we initiate — request token)
+ *   3<CALL><SSID_LO><SSID_HI><RTT> \r          (our route)
+ *   3-\r                                       (release token)
+ *
+ * When include_request_token is zero (replying to peer's '3+'):
+ *   3<CALL><SSID_LO><SSID_HI><RTT> \r          (our route)
+ *   3-\r                                       (release token)
+ *
+ * Rationale (M6.9.3 — observed 2026-04-19):
+ *   PCFlexnet sends us '3+' right after handshake to request our routes.
+ *   Our old code replied with '3+' + record + '3-'.  The extra '3+'
+ *   arrives at pcf while pcf's token-state [ebx+0xF] is already 3 (it
+ *   set 0→3 when it sent '3+').  Per the '+' handler at VA 0x1000641B,
+ *   '3+' with state != 0 hits the reject path (0x100065A0) and pcf
+ *   disconnects the link.  Captured in the traffic log:
+ *     21:43:12.542  pcf→us "3+"
+ *     21:43:12.543  us→pcf "3+"           <-- reject trigger
+ *     21:43:12.547  us→pcf "3-"
+ *     21:43:12.549  pcf→us DISC+          <-- pcf drops the link
+ *   Fix: never echo '3+' when responding to the peer's '3+' request.
  *
  * Port-aware (M6.7): when g_port_idx is valid, picks the listen_call and
  * SSID range from g_cfg.ports[g_port_idx] so each CE child advertises
@@ -198,7 +216,7 @@ static int ce_send_init_response(int fd)
  * on their respective links.  Falls back to legacy flat fields when no
  * port context is set (e.g. pipe-mode handler via ax25d).
  */
-static int send_own_routes(int fd)
+static int send_own_routes(int fd, int include_request_token)
 {
     /* Pick the source callsign (listen_call) and SSID range for THIS port. */
     const char *listen_call = NULL;
@@ -221,9 +239,11 @@ static int send_own_routes(int fd)
     int  dummy_ssid = 0;
     callsign_parse_ssid(listen_call, base, &dummy_ssid);
 
-    /* Request token */
-    uint8_t req[] = { '3', '+', '\r' };
-    ax25_send(fd, PID_CE, req, 3);
+    /* Request token (only when WE initiate the exchange) */
+    if (include_request_token) {
+        uint8_t req[] = { '3', '+', '\r' };
+        ax25_send(fd, PID_CE, req, 3);
+    }
 
     /* Our route via ce_build_record (single wire-format source) */
     uint8_t route[64];
@@ -233,15 +253,16 @@ static int send_own_routes(int fd)
     if (rlen > 0)
         ax25_send(fd, PID_CE, route, rlen);
 
-    /* Release token */
+    /* Release token (always — signals end of our batch) */
     uint8_t rel[] = { '3', '-', '\r' };
     ax25_send(fd, PID_CE, rel, 3);
 
     const char *port_name = (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports)
                             ? g_cfg.ports[g_port_idx].name
                             : g_cfg.port_name;
-    LOG_INF("send_own_routes: port=%s advertised %s SSID %d-%d RTT=1",
-            port_name, base, min_ssid, max_ssid);
+    LOG_INF("send_own_routes: port=%s advertised %s SSID %d-%d RTT=1%s",
+            port_name, base, min_ssid, max_ssid,
+            include_request_token ? " (with request token)" : " (reply, no request token)");
     return 0;
 }
 
@@ -411,7 +432,7 @@ static int run_native_ce_session(int fd)
                 LOG_DBG("run_native_ce_session: periodic route re-advert "
                         "(%lds since last)",
                         (long)(now - last_routes_tx));
-                send_own_routes(fd);
+                send_own_routes(fd, 1);   /* WE initiate → include '3+' */
                 last_routes_tx = now;
             }
 
@@ -581,7 +602,7 @@ static int run_native_ce_session(int fd)
             if (!sent_routes && got_peer_init && got_setup) {
                 LOG_INF("run_native_ce_session: link stable — "
                         "sending our routes");
-                send_own_routes(fd);
+                send_own_routes(fd, 1);   /* WE initiate → include '3+' */
                 sent_routes    = 1;
                 last_routes_tx = time(NULL);   /* M6.7: seed re-advert timer */
             }
@@ -789,22 +810,27 @@ static int run_native_ce_session(int fd)
             int r = ce_parse_frame(buf, len, NULL, NULL, NULL);
 
             if (r == CE_FRAME_STATUS_POS) {
-                /* '3+' = "request token" — peer is asking us to
-                 * exchange routes.  Send ours if not already done. */
-                LOG_INF("run_native_ce_session: '3+' received from peer");
-                if (!sent_routes) {
-                    send_own_routes(fd);
-                    sent_routes    = 1;
-                    last_routes_tx = time(NULL);   /* M6.7: seed re-advert timer */
-                } else {
-                    /* Already sent — just ack the token request */
-                    uint8_t ack[] = { '3', '+', '\r' };
-                    ax25_send(fd, PID_CE, ack, 3);
-                    uint8_t rel[] = { '3', '-', '\r' };
-                    ax25_send(fd, PID_CE, rel, 3);
-                    LOG_INF("run_native_ce_session: routes already "
-                            "sent, acked token request");
-                }
+                /* '3+' = "request token" — peer is asking us to send
+                 * our routes.  Reply with records + '3-', but do NOT
+                 * echo '3+' back.
+                 *
+                 * M6.9.3 bug fix: previously we sent '3+' + records + '3-'
+                 * in both branches.  Pcf's '+' handler (VA 0x1000641B)
+                 * only accepts '3+' when its token state [ebx+0xF] == 0,
+                 * but pcf set that state to 3 when IT sent its '3+'.
+                 * Our echo therefore hit pcf's reject path (VA 0x100065A0)
+                 * and pcf DISCONNECTED the link within 2 ms of our '3-'.
+                 * Captured 2026-04-19 21:43:12.543→21:43:12.549 in the
+                 * "L 2 iw2ohx-3" trace.
+                 *
+                 * Always respond to peer's '3+' with records + '3-' only.
+                 * Update the sent_routes / last_routes_tx bookkeeping so
+                 * the M6.7 re-advert timer doesn't fire redundantly. */
+                LOG_INF("run_native_ce_session: '3+' received from peer "
+                        "— replying with records + '3-' (no '3+' echo)");
+                send_own_routes(fd, 0);            /* reply → NO '3+' */
+                sent_routes    = 1;
+                last_routes_tx = time(NULL);
                 t_start = time(NULL);
                 continue;
             }
