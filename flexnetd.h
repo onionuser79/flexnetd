@@ -41,6 +41,7 @@
 #define DEFAULT_KEEPALIVE_S     90
 #define DEFAULT_BEACON_S        120
 #define DEFAULT_ROUTE_ADVERT_S  60   /* M6.7: periodic re-advertisement of our routes */
+#define DEFAULT_LT_REPLY_S      90   /* M6.9: min seconds between link-time frames to a peer */
 #define DEFAULT_PROBE_COUNT     19
 #define DEFAULT_PROBE_INTERVAL_MS 7500
 #define DEFAULT_TRIGGER_THRESH  50
@@ -163,6 +164,7 @@ typedef struct {
     int     probe_count;
     int     path_probe_interval;    /* M5.3: seconds between type-6 probes */
     int     route_advert_interval;  /* M6.7: seconds between route re-advertisements (0=once only) */
+    int     lt_reply_interval;      /* M6.9: min seconds between link-time TX (PCFlexnet expects ~320s polling; 90s is a compromise) */
 } FlexConfig;
 
 extern FlexConfig g_cfg;
