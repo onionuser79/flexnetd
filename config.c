@@ -41,6 +41,7 @@ static void set_defaults(FlexConfig *cfg)
     cfg->log_level            = LOG_LEVEL_INFO;
     cfg->use_syslog           = 0;
     cfg->probe_count          = DEFAULT_PROBE_COUNT;
+    cfg->path_probe_interval  = CE_PATH_PROBE_SEC;
 }
 
 int config_load(const char *path, FlexConfig *cfg)
@@ -120,6 +121,8 @@ int config_load(const char *path, FlexConfig *cfg)
             cfg->use_syslog = (!strcasecmp(val, "yes") || !strcmp(val, "1"));
         else if (!strcasecmp(key, "ProbeCount"))
             cfg->probe_count = atoi(val);
+        else if (!strcasecmp(key, "PathProbeInterval"))
+            cfg->path_probe_interval = atoi(val);
         else
             LOG_WRN("config[%d]: unknown keyword '%s'", lineno, key);
     }
@@ -147,6 +150,7 @@ void config_dump(const FlexConfig *cfg)
     LOG_INF("  DestFile          : %s", cfg->dest_file);
     LOG_INF("  LinkStatsFile     : %s", cfg->linkstats_file);
     LOG_INF("  PathsFile         : %s", cfg->paths_file);
+    LOG_INF("  PathProbeInterval : %d s", cfg->path_probe_interval);
     LOG_INF("  LogLevel          : %d", cfg->log_level);
     LOG_INF("  Syslog            : %s", cfg->use_syslog ? "yes" : "no");
     LOG_INF("==============================");

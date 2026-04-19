@@ -76,6 +76,7 @@
 #define CE_PATH_TIMEOUT_SEC     30       /* pending query expiry          */
 #define CE_PATH_CACHE_TTL_SEC   300      /* path cache freshness          */
 #define CE_PATH_MAX_CACHE       256      /* cached reply buffer entries   */
+#define CE_PATH_PROBE_SEC       60       /* default interval between probes */
 
 /* Path kinds (bit 0x40 of QSO[0]) */
 #define CE_PATH_KIND_ROUTE      0        /* bit clear = Route             */
@@ -128,6 +129,7 @@ typedef struct {
     int     log_level;
     int     use_syslog;
     int     probe_count;
+    int     path_probe_interval;    /* M5.3: seconds between type-6 probes */
 } FlexConfig;
 
 extern FlexConfig g_cfg;
@@ -311,6 +313,7 @@ int  path_pending_find(int qso);
 void path_pending_remove(int qso);
 void path_pending_sweep(void);
 int  path_pending_next_qso(void);
+void path_pending_dump(void);   /* log all pending entries (DEBUG) */
 
 /* ── Path cache ────────────────────────────────────────────────────── */
 int output_write_paths_cache_add(const PathReply *r);

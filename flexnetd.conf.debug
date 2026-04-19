@@ -1,0 +1,49 @@
+# /usr/local/etc/ax25/flexnetd.conf.debug
+# flexnetd — DEBUG configuration for M5.3 testing
+#
+# Usage:
+#   sudo /usr/local/sbin/flexnetd_debug -f -vvv \
+#       -l /tmp/flexnetd_m53.log \
+#       -c /usr/local/etc/ax25/flexnetd.conf.debug
+#
+# This enables:
+#   - Foreground mode (-f) so you can Ctrl-C
+#   - DEBUG log level (-vvv) with hex dumps of every type-6/7 frame
+#   - Dual console + file logging (-l)
+#   - Fast probe interval (10s) for quick test/feedback loops
+#
+# Then watch what is happening:
+#   tail -F /tmp/flexnetd_m53.log
+#   watch -n1 'cat /usr/local/var/lib/ax25/flex/paths'
+#   flexdest -r ir5s
+
+MyCall          IW2OHX-3
+Alias           OHXGW
+MinSSID         3
+MaxSSID         3
+
+Neighbor        IW2OHX-14
+PortName        xnet
+
+FlexListenCall  IW2OHX-3
+
+Role            server
+
+PollInterval    240
+KeepaliveInterval  90
+BeaconInterval  120
+
+GatewaysFile    /usr/local/var/lib/ax25/flex/gateways
+DestFile        /usr/local/var/lib/ax25/flex/destinations
+LinkStatsFile   /usr/local/var/lib/ax25/flex/linkstats
+PathsFile       /usr/local/var/lib/ax25/flex/paths
+
+# DEBUG: probe every 10 seconds — full table of 200 dests scanned
+# in about 33 minutes.  Bump down to 5s for extra aggression if needed.
+PathProbeInterval  10
+
+Infinity        60000
+TriggerThreshold  50
+
+LogLevel        4
+Syslog          no
