@@ -237,7 +237,7 @@ confirmed wire protocol.
 | v0.4.0 | Protocol correctness (SSID, init, L3RTT) + debug logging | **Released** |
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
 | v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
-| v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Released** |
+| v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
 | v0.7.0 | M6 — Multi-neighbor support (two FlexNet ports) | Planned |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
