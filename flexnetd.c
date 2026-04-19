@@ -77,33 +77,57 @@ static int ensure_output_dir(const char *filepath)
 
 /* ── SERVER MODE ─────────────────────────────────────────────────────── */
 /*
- * Bind FlexListenCall (the port's own callsign) directly.
- * Dispatch by first-frame PID:
- *   CE/CF -> native FlexNet session handler
- *   F0    -> fork + exec uronode
+ * M6 architecture A: one listen socket per configured port, all bound
+ * to the port's listen callsign (typically the same across ports, e.g.
+ * IW2OHX-3), each pinned with SO_BINDTODEVICE.  select() across the
+ * listen fds; on accept, look up which port the connection came in on
+ * and apply that port's neighbor matching.
+ *
+ * Dispatch by peer callsign vs. port's configured neighbor:
+ *   peer == port.neighbor  → fork CE/CF session handler
+ *   anything else          → fork + exec uronode
  */
 static int run_server(void)
 {
-    LOG_INF("flexnetd: SERVER MODE");
-    LOG_INF("flexnetd: listening on %s (port %s)",
-            g_cfg.flex_listen_call, g_cfg.port_name);
-    LOG_INF("flexnetd: FlexNet from %s -> native CE/CF handler",
-            g_cfg.neighbor);
-    LOG_INF("flexnetd: user sessions -> exec uronode");
+    LOG_INF("flexnetd: SERVER MODE (%d port%s configured)",
+            g_cfg.num_ports, g_cfg.num_ports == 1 ? "" : "s");
 
-    int listen_fd = ax25_listen(g_cfg.flex_listen_call, g_cfg.port_name);
-    if (listen_fd < 0) {
-        LOG_ERR("flexnetd: ax25_listen('%s') failed",
-                g_cfg.flex_listen_call);
-        LOG_ERR("flexnetd: ensure [%s VIA %s] is ABSENT from ax25d.conf",
-                g_cfg.flex_listen_call, g_cfg.port_name);
+    if (g_cfg.num_ports <= 0) {
+        LOG_ERR("flexnetd: no Port entries configured (and no legacy "
+                "Neighbor/PortName/FlexListenCall either)");
         return -1;
     }
 
-    /* Tune kernel AX.25 timing for this AXUDP port:
-     * t2_timeout=50ms (fast ack), window=7 (match axports) */
-    ax25_tune_interface(g_cfg.port_name);
+    /* Array of listen fds, one per port.  Index matches g_cfg.ports[]. */
+    int  listen_fd[MAX_PORTS];
+    int  listen_count = 0;
+    for (int i = 0; i < g_cfg.num_ports; i++) {
+        const PortCfg *pc = &g_cfg.ports[i];
+        LOG_INF("flexnetd: port[%d] %s  listen=%s  neighbor=%s",
+                i, pc->name, pc->listen_call, pc->neighbor);
 
+        int fd = ax25_listen(pc->listen_call, pc->name);
+        if (fd < 0) {
+            LOG_ERR("flexnetd: ax25_listen('%s' on '%s') failed",
+                    pc->listen_call, pc->name);
+            LOG_ERR("flexnetd: ensure [%s VIA %s] is ABSENT from ax25d.conf",
+                    pc->listen_call, pc->name);
+            /* close any sockets already opened */
+            for (int j = 0; j < listen_count; j++)
+                close(listen_fd[j]);
+            return -1;
+        }
+        listen_fd[listen_count++] = fd;
+
+        /* Tune kernel AX.25 timing for this port:
+         * t2_timeout=50ms (fast ack), window=7 (match axports) */
+        ax25_tune_interface(pc->name);
+    }
+    LOG_INF("flexnetd: FlexNet neighbor sessions → native CE/CF handler");
+    LOG_INF("flexnetd: user sessions             → exec uronode");
+
+    /* Write gateways file (still uses legacy cfg->neighbor for now —
+     * M6.5 will extend this to one row per port). */
     output_write_gateways();
     int session_count = 0;
 
@@ -112,9 +136,13 @@ static int run_server(void)
         fd_set rfds;
         struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
         FD_ZERO(&rfds);
-        FD_SET(listen_fd, &rfds);
+        int max_fd = -1;
+        for (int i = 0; i < listen_count; i++) {
+            FD_SET(listen_fd[i], &rfds);
+            if (listen_fd[i] > max_fd) max_fd = listen_fd[i];
+        }
 
-        int ret = select(listen_fd + 1, &rfds, NULL, NULL, &tv);
+        int ret = select(max_fd + 1, &rfds, NULL, NULL, &tv);
         if (ret < 0) {
             if (errno == EINTR) continue;
             LOG_ERR("flexnetd: select(): %s", strerror(errno));
@@ -122,120 +150,127 @@ static int run_server(void)
         }
         if (ret == 0) continue;
 
-        char peer_call[MAX_CALLSIGN_LEN] = {0};
-        int  conn_fd = ax25_accept(listen_fd, peer_call, sizeof(peer_call));
-        if (conn_fd < 0) {
-            LOG_ERR("flexnetd: accept(): %s", strerror(errno));
-            sleep(1);
-            continue;
-        }
+        /* Find which listen fd(s) fired.  Accept from each in turn. */
+        for (int i = 0; i < listen_count; i++) {
+            if (!FD_ISSET(listen_fd[i], &rfds)) continue;
 
-        session_count++;
-        LOG_INF("flexnetd: === SESSION #%d from %s ===",
-                session_count, peer_call);
-
-        /*
-         * Determine protocol: FlexNet neighbor or user session.
-         *
-         * If the peer is our configured neighbor, this is a FlexNet
-         * session — send a CE keepalive to kick-start the exchange
-         * (the peer may wait for us to send first after a fresh L2 link).
-         *
-         * Otherwise, peek at the first byte to classify.
-         */
-        uint8_t first_pid = 0;
-        int is_neighbor = (strcasecmp(peer_call, g_cfg.neighbor) == 0);
-
-        if (is_neighbor) {
-            /* FlexNet neighbor — enable PIDINCL for CE/CF framing */
-            ax25_enable_pidincl(conn_fd);
-
-            /* Send CE link setup (SSID range) */
-            LOG_INF("flexnetd: neighbor %s connected — "
-                    "sending CE link setup (SSID %d-%d)",
-                    peer_call, g_cfg.min_ssid, g_cfg.max_ssid);
-            uint8_t setup[8];
-            int slen = ce_build_link_setup(setup, sizeof(setup),
-                                           g_cfg.min_ssid, g_cfg.max_ssid);
-            if (slen > 0)
-                ax25_send(conn_fd, PID_CE, setup, slen);
-            /* Send keepalive to kick-start the exchange —
-             * the peer waits for this before sending routing data */
-            send_ce_keepalive(conn_fd);
-            first_pid = PID_CE;  /* treat as FlexNet session */
-        } else {
-            /* Non-neighbor peer — always a user session.
-             *
-             * FlexNet L3 routed connections arrive with the actual
-             * user callsign (e.g. IW7BIA-15), not the neighbor call.
-             * No need to peek/wait — dispatch to uronode immediately
-             * so the user sees the MOTD without having to send CR. */
-            LOG_INF("flexnetd: session #%d — non-neighbor %s, "
-                    "dispatching to uronode", session_count, peer_call);
-            first_pid = PID_F0;  /* force user session path */
-        }
-
-        LOG_INF("flexnetd: session #%d first_pid=0x%02X from %s",
-                session_count, first_pid, peer_call);
-
-        if (first_pid == PID_CE || first_pid == PID_CF) {
-            /* Native FlexNet peering — fork so the accept loop stays free
-             * for user connections while the CE session runs (minutes). */
-            LOG_INF("flexnetd: FlexNet session (pid=0x%02X) from %s",
-                    first_pid, peer_call);
-            pid_t ce_child = fork();
-            if (ce_child < 0) {
-                LOG_ERR("flexnetd: fork(CE): %s", strerror(errno));
-                ax25_disconnect(conn_fd);
-            } else if (ce_child == 0) {
-                /* Child: run the CE session, write output, exit */
-                close(listen_fd);
-                dtable_init();
-                int r = poll_cycle_run_mode(conn_fd, 1);
-                ax25_disconnect(conn_fd);
-                if (r == 0 && g_table.count > 0) {
-                    output_write_destinations();
-                    LOG_INF("flexnetd: CE child done — %d routes written",
-                            g_table.count);
-                } else {
-                    LOG_WRN("flexnetd: CE child done — no routes (r=%d)", r);
-                }
-                if (g_log_level >= LOG_LEVEL_DEBUG) dtable_dump();
-                _exit(0);
-            } else {
-                /* Parent: close conn_fd, CE child owns it */
-                close(conn_fd);
-                LOG_INF("flexnetd: CE session pid=%d for session #%d",
-                        (int)ce_child, session_count);
+            const PortCfg *pc = &g_cfg.ports[i];
+            char peer_call[MAX_CALLSIGN_LEN] = {0};
+            int  conn_fd = ax25_accept(listen_fd[i],
+                                       peer_call, sizeof(peer_call));
+            if (conn_fd < 0) {
+                LOG_ERR("flexnetd: accept(port=%s): %s",
+                        pc->name, strerror(errno));
+                sleep(1);
+                continue;
             }
 
-        } else {
-            /* User session — dispatch to uronode */
-            LOG_INF("flexnetd: user session (pid=0x%02X) -> uronode", first_pid);
-            pid_t child = fork();
-            if (child < 0) {
-                LOG_ERR("flexnetd: fork(): %s", strerror(errno));
-                ax25_disconnect(conn_fd);
-            } else if (child == 0) {
-                /* Child: wire conn_fd to stdin/stdout/stderr, exec uronode */
-                dup2(conn_fd, 0);
-                dup2(conn_fd, 1);
-                dup2(conn_fd, 2);
-                close(conn_fd);
-                close(listen_fd);
-                execl("/usr/local/sbin/uronode", "uronode", (char *)NULL);
-                LOG_ERR("flexnetd: execl(uronode): %s", strerror(errno));
-                _exit(1);
+            session_count++;
+            LOG_INF("flexnetd: === SESSION #%d from %s on port %s ===",
+                    session_count, peer_call, pc->name);
+
+            /* Determine protocol: FlexNet neighbor OR user session.
+             * Match peer against THIS port's configured neighbor. */
+            uint8_t first_pid = 0;
+            int is_neighbor = (strcasecmp(peer_call, pc->neighbor) == 0);
+
+            if (is_neighbor) {
+                /* FlexNet neighbor — enable PIDINCL for CE/CF framing */
+                ax25_enable_pidincl(conn_fd);
+
+                /* Send CE link setup (SSID range) */
+                LOG_INF("flexnetd: neighbor %s connected on %s — "
+                        "sending CE link setup (SSID %d-%d)",
+                        peer_call, pc->name, pc->min_ssid, pc->max_ssid);
+                uint8_t setup[8];
+                int slen = ce_build_link_setup(setup, sizeof(setup),
+                                               pc->min_ssid, pc->max_ssid);
+                if (slen > 0)
+                    ax25_send(conn_fd, PID_CE, setup, slen);
+                /* Send keepalive to kick-start the exchange */
+                send_ce_keepalive(conn_fd);
+                first_pid = PID_CE;
             } else {
-                /* Parent: close conn_fd, uronode child owns it now */
-                close(conn_fd);
-                LOG_INF("flexnetd: uronode pid=%d for session #%d",
-                        (int)child, session_count);
+                /* Non-neighbor peer — always a user session.
+                 * FlexNet L3 routed connections arrive with the actual
+                 * user callsign (e.g. IW7BIA-15), not the neighbor call.
+                 * Dispatch to uronode immediately so the user sees the
+                 * MOTD without having to press CR. */
+                LOG_INF("flexnetd: session #%d — non-neighbor %s on %s, "
+                        "dispatching to uronode",
+                        session_count, peer_call, pc->name);
+                first_pid = PID_F0;
+            }
+
+            LOG_INF("flexnetd: session #%d first_pid=0x%02X port=%s peer=%s",
+                    session_count, first_pid, pc->name, peer_call);
+
+            if (first_pid == PID_CE || first_pid == PID_CF) {
+                /* Native FlexNet peering — fork so the accept loop stays
+                 * free for more connections while the CE session runs. */
+                LOG_INF("flexnetd: FlexNet session (pid=0x%02X) from %s on %s",
+                        first_pid, peer_call, pc->name);
+                pid_t ce_child = fork();
+                if (ce_child < 0) {
+                    LOG_ERR("flexnetd: fork(CE): %s", strerror(errno));
+                    ax25_disconnect(conn_fd);
+                } else if (ce_child == 0) {
+                    /* Child: close ALL listen fds (not just one), run
+                     * the CE session, write output, exit */
+                    for (int j = 0; j < listen_count; j++)
+                        close(listen_fd[j]);
+                    dtable_init();
+                    int r = poll_cycle_run_mode(conn_fd, 1);
+                    ax25_disconnect(conn_fd);
+                    if (r == 0 && g_table.count > 0) {
+                        output_write_destinations();
+                        LOG_INF("flexnetd: CE child done — %d routes written",
+                                g_table.count);
+                    } else {
+                        LOG_WRN("flexnetd: CE child done — no routes (r=%d)",
+                                r);
+                    }
+                    if (g_log_level >= LOG_LEVEL_DEBUG) dtable_dump();
+                    _exit(0);
+                } else {
+                    /* Parent: close conn_fd, CE child owns it */
+                    close(conn_fd);
+                    LOG_INF("flexnetd: CE session pid=%d for session #%d",
+                            (int)ce_child, session_count);
+                }
+            } else {
+                /* User session — dispatch to uronode */
+                LOG_INF("flexnetd: user session (pid=0x%02X) → uronode",
+                        first_pid);
+                pid_t child = fork();
+                if (child < 0) {
+                    LOG_ERR("flexnetd: fork(): %s", strerror(errno));
+                    ax25_disconnect(conn_fd);
+                } else if (child == 0) {
+                    /* Child: wire conn_fd to stdio, exec uronode.
+                     * Close ALL listen fds so they don't leak. */
+                    dup2(conn_fd, 0);
+                    dup2(conn_fd, 1);
+                    dup2(conn_fd, 2);
+                    close(conn_fd);
+                    for (int j = 0; j < listen_count; j++)
+                        close(listen_fd[j]);
+                    execl("/usr/local/sbin/uronode", "uronode",
+                          (char *)NULL);
+                    LOG_ERR("flexnetd: execl(uronode): %s", strerror(errno));
+                    _exit(1);
+                } else {
+                    /* Parent: close conn_fd, uronode child owns it now */
+                    close(conn_fd);
+                    LOG_INF("flexnetd: uronode pid=%d for session #%d",
+                            (int)child, session_count);
+                }
             }
         }
     }
 
-    close(listen_fd);
+    for (int i = 0; i < listen_count; i++)
+        close(listen_fd[i]);
     LOG_INF("flexnetd: server stopped (sessions: %d)", session_count);
     return 0;
 }
