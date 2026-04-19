@@ -244,6 +244,7 @@ static int run_native_ce_session(int fd)
     time_t  last_stats_write = 0;   /* last time we wrote linkstats     */
     time_t  last_probe_sent  = 0;   /* last time we sent a type-6 probe */
     int     probe_idx        = 0;   /* round-robin dtable index         */
+    time_t  last_keepalive_tx = time(NULL);   /* proactive keepalive timer */
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
@@ -269,6 +270,38 @@ static int run_native_ce_session(int fd)
                 path_pending_sweep();  /* expire stale in-flight queries */
                 path_pending_dump();   /* DEBUG-only: log table state */
                 last_stats_write = now;
+            }
+
+            /* Proactive CE keepalive timer.  Some peers (e.g. PCFlexnet
+             * on the pcf port) do NOT send CE keepalives autonomously —
+             * they expect us to initiate and respond to theirs.  If the
+             * peer is silent we would never send either, the RTT timer
+             * on the peer's side expires (4095 sample), and the session
+             * gets torn down and reconnected.
+             *
+             * Send a keepalive every 20 s since the last one we sent.
+             * xnet (which DOES send keepalives of its own) still works
+             * because our extra ones are harmless — it just responds.
+             *
+             * We also send a link-time probe after the keepalive so the
+             * peer's RTT cycle has something to measure against. */
+            if (now - last_keepalive_tx >= 20) {
+                LOG_DBG("run_native_ce_session: proactive keepalive "
+                        "(quiet %lds)", (long)(now - last_keepalive_tx));
+                send_ce_keepalive(fd);
+                g_link_stats.tx_bytes += CE_KEEPALIVE_LEN;
+                g_link_stats.tx_frames++;
+
+                uint8_t lt_buf[32];
+                int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
+                if (lt_len > 0) {
+                    ax25_send(fd, PID_CE, lt_buf, lt_len);
+                    g_link_stats.tx_bytes += lt_len;
+                    g_link_stats.tx_frames++;
+                    clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                    lt_sent_pending = 1;
+                }
+                last_keepalive_tx = now;
             }
 
             /* M5.3: Periodic type-6 path probe (interval from config).
@@ -399,6 +432,8 @@ static int run_native_ce_session(int fd)
             send_ce_keepalive(fd);
             g_link_stats.tx_bytes += CE_KEEPALIVE_LEN;
             g_link_stats.tx_frames++;
+            /* Reset proactive-keepalive timer — we just sent one. */
+            last_keepalive_tx = time(NULL);
 
             /* Send link time on every keepalive cycle so the peer can
              * converge its smoothed RTT.  Without this, Q/T stays
