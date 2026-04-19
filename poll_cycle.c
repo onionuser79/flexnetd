@@ -248,9 +248,19 @@ static int run_native_ce_session(int fd)
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
-    /* Initialize link stats for this session */
+    /* Initialize link stats for this session.
+     * M6.6: use THIS CE child's port-specific neighbor (from g_port_idx)
+     * instead of the legacy g_cfg.neighbor (which mirrors ports[0]). */
     memset(&g_link_stats, 0, sizeof(g_link_stats));
-    snprintf(g_link_stats.neighbor, MAX_CALLSIGN_LEN, "%s", g_cfg.neighbor);
+    if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports) {
+        snprintf(g_link_stats.neighbor, MAX_CALLSIGN_LEN, "%s",
+                 g_cfg.ports[g_port_idx].neighbor);
+        g_link_stats.port_num = g_port_idx;
+    } else {
+        snprintf(g_link_stats.neighbor, MAX_CALLSIGN_LEN, "%s",
+                 g_cfg.neighbor);
+        g_link_stats.port_num = 0;
+    }
     g_link_stats.connect_time = t_start;
     g_link_stats.qt           = 1;     /* direct link = Q/T 1 (best) */
     g_link_stats.rtt_last     = 0;

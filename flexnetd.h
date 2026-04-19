@@ -207,6 +207,15 @@ typedef struct {
 
 extern LinkStats g_link_stats;
 
+/* M6.6 port-context global.
+ *   -1 = no CE session context (parent process, or pre-fork)
+ *   ≥0 = index into g_cfg.ports[] for the CE session running in this
+ *        process (set in flexnetd.c accept loop right before fork).
+ * Children inherit the parent's g_port_idx at fork time and keep it.
+ * Used by output.c to write per-port linkstats and merge into the
+ * unified linkstats output file. */
+extern int g_port_idx;
+
 /* ── Path query types (M5.3 — CE type-6/7) ──────────────────────────── */
 
 /* Parsed type-7 reply */

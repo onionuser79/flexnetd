@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <fcntl.h>
+#include <sys/file.h>       /* for flock() */
 #include "flexnetd.h"
 
 LinkStats g_link_stats;
@@ -156,46 +158,32 @@ static void fmt_bytes(long bytes, char *buf, int buflen)
         snprintf(buf, buflen, "%ld", bytes);
 }
 
-int output_write_linkstats(void)
+/*
+ * format_linkstats_row — render this process's g_link_stats into `out`
+ * as a single line in the L-table format.  Returns number of chars
+ * written (not including trailing nul), or -1 on error.
+ *
+ * Rendered line has NO trailing newline; caller adds one if needed
+ * (the per-port file stores the raw line with '\n', the merged main
+ * file adds them too).
+ */
+static int format_linkstats_row(char *out, int outlen)
 {
-    if (!g_link_stats.active) return 0;
-
-    char tmp[MAX_PATH_LEN + 8];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", g_cfg.linkstats_file);
-
-    FILE *f = fopen(tmp, "w");
-    if (!f) {
-        LOG_ERR("output_write_linkstats: cannot open '%s': %s",
-                tmp, strerror(errno));
-        return -1;
-    }
-
-    /* Header matching the L command format */
-    fprintf(f, "Link to       dst    Q/T    rtt    tx connect"
-               "   tx   rx   txq/rxq  rr+%%  bit/s\n");
-
     long elapsed = (long)(time(NULL) - g_link_stats.connect_time);
     if (elapsed < 1) elapsed = 1;
 
-    char dur[16];
+    char dur[16], tx_str[12], rx_str[12];
     fmt_duration(elapsed, dur, sizeof(dur));
-
-    char tx_str[12], rx_str[12];
     fmt_bytes(g_link_stats.tx_bytes, tx_str, sizeof(tx_str));
     fmt_bytes(g_link_stats.rx_bytes, rx_str, sizeof(rx_str));
 
-    /* tx/rx frame success: we see all frames at L7, so 100/100
-     * unless we have send failures (not tracked yet) */
     int txq = (g_link_stats.tx_frames > 0) ? 100 : 0;
     int rxq = (g_link_stats.rx_frames > 0) ? 100 : 0;
-
-    /* bit/s from total bytes / elapsed (divide first to avoid overflow) */
     long bps = (g_link_stats.tx_bytes + g_link_stats.rx_bytes) / elapsed * 8;
 
-    /* port:neighbor  dst  mode Q/T  rtt_last/smoothed  tx  connect
-     *   tx_bytes  rx_bytes  txq/rxq  rr+%  bit/s */
-    fprintf(f, "%2d:%-9s %3d F %3d %3d/%-3d   %3d %7s %5s %5s"
-               "   %3d/%3d   %3.1f  %5ld\n",
+    return snprintf(out, (size_t)outlen,
+            "%2d:%-9s %3d F %3d %3d/%-3d   %3d %7s %5s %5s"
+            "   %3d/%3d   %3.1f  %5ld\n",
             g_link_stats.port_num,
             g_link_stats.neighbor,
             g_link_stats.dst_count,
@@ -203,24 +191,162 @@ int output_write_linkstats(void)
             g_link_stats.rtt_last,
             g_link_stats.rtt_smoothed,
             0,                          /* tx connect count (not tracked) */
-            dur,
-            tx_str, rx_str,
+            dur, tx_str, rx_str,
             txq, rxq,
             0.0,                        /* rr+% (L2 stat, not visible at L7) */
             bps);
+}
 
-    fclose(f);
-
-    if (rename(tmp, g_cfg.linkstats_file) < 0) {
-        LOG_ERR("output_write_linkstats: rename failed: %s", strerror(errno));
-        unlink(tmp);
+/*
+ * linkstats_merge — read the per-port file for each configured port
+ * and emit a single unified linkstats file with one row per port.
+ * Serialised via flock on a sibling .lock file so concurrent CE
+ * children don't stomp on each other.
+ *
+ * File layout:
+ *   /usr/local/var/lib/ax25/flex/linkstats.xnet   ← written by CE child #0
+ *   /usr/local/var/lib/ax25/flex/linkstats.pcf    ← written by CE child #1
+ *   /usr/local/var/lib/ax25/flex/linkstats        ← merged, with header
+ *   /usr/local/var/lib/ax25/flex/linkstats.lock   ← flock sentinel
+ */
+static int linkstats_merge(void)
+{
+    char lock_path[MAX_PATH_LEN + 8];
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", g_cfg.linkstats_file);
+    int lfd = open(lock_path, O_CREAT | O_WRONLY, 0644);
+    if (lfd < 0) {
+        LOG_ERR("linkstats_merge: open lock '%s': %s",
+                lock_path, strerror(errno));
+        return -1;
+    }
+    if (flock(lfd, LOCK_EX) < 0) {
+        LOG_ERR("linkstats_merge: flock: %s", strerror(errno));
+        close(lfd);
         return -1;
     }
 
-    LOG_DBG("output_write_linkstats: dst=%d Q/T=%d rtt=%d/%d %s tx=%s rx=%s",
-            g_link_stats.dst_count, g_link_stats.qt,
+    char tmp[MAX_PATH_LEN + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", g_cfg.linkstats_file);
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        LOG_ERR("linkstats_merge: cannot open '%s': %s",
+                tmp, strerror(errno));
+        flock(lfd, LOCK_UN); close(lfd);
+        return -1;
+    }
+
+    /* L-table header (once, at the top) */
+    fprintf(f, "Link to       dst    Q/T    rtt    tx connect"
+               "   tx   rx   txq/rxq  rr+%%  bit/s\n");
+
+    int rows = 0;
+    for (int i = 0; i < g_cfg.num_ports; i++) {
+        char per_port[MAX_PATH_LEN + 24];
+        snprintf(per_port, sizeof(per_port), "%s.%s",
+                 g_cfg.linkstats_file, g_cfg.ports[i].name);
+        FILE *pf = fopen(per_port, "r");
+        if (!pf) continue;   /* port not active yet / no session */
+
+        char line[512];
+        if (fgets(line, sizeof(line), pf)) {
+            fputs(line, f);
+            rows++;
+        }
+        fclose(pf);
+    }
+    fclose(f);
+
+    if (rename(tmp, g_cfg.linkstats_file) < 0) {
+        LOG_ERR("linkstats_merge: rename: %s", strerror(errno));
+        unlink(tmp);
+        flock(lfd, LOCK_UN); close(lfd);
+        return -1;
+    }
+
+    LOG_DBG("linkstats_merge: wrote unified file with %d row%s",
+            rows, rows == 1 ? "" : "s");
+    flock(lfd, LOCK_UN);
+    close(lfd);
+    return 0;
+}
+
+/*
+ * output_write_linkstats — called periodically by each CE child to
+ * refresh the link status for THIS session.
+ *
+ * M6.6: the child writes a single-line file named
+ * `linkstats.<port_name>` (e.g. linkstats.xnet) with its own row,
+ * then calls linkstats_merge() to build the unified linkstats file
+ * from all known per-port files.  Two CE children peering with
+ * different neighbors therefore produce TWO visible rows in URONode's
+ * `fl` output instead of clobbering each other.
+ *
+ * If g_port_idx is not set (single-port legacy mode or parent-process
+ * write), we fall back to writing the unified file directly with the
+ * single row — preserving v0.6.0 behaviour for single-port setups.
+ */
+int output_write_linkstats(void)
+{
+    if (!g_link_stats.active) return 0;
+
+    /* Legacy / parent fallback: no port context → write directly. */
+    if (g_port_idx < 0 || g_port_idx >= g_cfg.num_ports) {
+        char tmp[MAX_PATH_LEN + 8];
+        snprintf(tmp, sizeof(tmp), "%s.tmp", g_cfg.linkstats_file);
+        FILE *f = fopen(tmp, "w");
+        if (!f) {
+            LOG_ERR("output_write_linkstats: cannot open '%s': %s",
+                    tmp, strerror(errno));
+            return -1;
+        }
+        fprintf(f, "Link to       dst    Q/T    rtt    tx connect"
+                   "   tx   rx   txq/rxq  rr+%%  bit/s\n");
+        char row[512];
+        format_linkstats_row(row, sizeof(row));
+        fputs(row, f);
+        fclose(f);
+        if (rename(tmp, g_cfg.linkstats_file) < 0) {
+            LOG_ERR("output_write_linkstats: rename: %s", strerror(errno));
+            unlink(tmp);
+            return -1;
+        }
+        LOG_DBG("output_write_linkstats: single-port write (no port ctx)");
+        return 0;
+    }
+
+    /* Multi-port path: write per-port file + merge unified */
+    const PortCfg *pc = &g_cfg.ports[g_port_idx];
+
+    char per_port[MAX_PATH_LEN + 24];
+    char per_tmp[MAX_PATH_LEN + 32];
+    snprintf(per_port, sizeof(per_port), "%s.%s",
+             g_cfg.linkstats_file, pc->name);
+    snprintf(per_tmp, sizeof(per_tmp), "%s.tmp", per_port);
+
+    FILE *pf = fopen(per_tmp, "w");
+    if (!pf) {
+        LOG_ERR("output_write_linkstats: per-port '%s': %s",
+                per_tmp, strerror(errno));
+        return -1;
+    }
+    char row[512];
+    format_linkstats_row(row, sizeof(row));
+    fputs(row, pf);
+    fclose(pf);
+    if (rename(per_tmp, per_port) < 0) {
+        LOG_ERR("output_write_linkstats: rename per-port: %s", strerror(errno));
+        unlink(per_tmp);
+        return -1;
+    }
+
+    /* Merge all per-port files into the unified output */
+    linkstats_merge();
+
+    LOG_DBG("output_write_linkstats: port=%s dst=%d Q/T=%d rtt=%d/%d "
+            "tx_bytes=%ld rx_bytes=%ld",
+            pc->name, g_link_stats.dst_count, g_link_stats.qt,
             g_link_stats.rtt_last, g_link_stats.rtt_smoothed,
-            dur, tx_str, rx_str);
+            g_link_stats.tx_bytes, g_link_stats.rx_bytes);
     return 0;
 }
 
