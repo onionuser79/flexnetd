@@ -833,3 +833,32 @@ void path_pending_sweep(void)
         }
     }
 }
+
+/*
+ * path_pending_dump — log the current pending-query table.
+ * Only emits at DEBUG log level.  Useful when diagnosing why
+ * flexdest -r shows no cache or why probes are not getting replies.
+ */
+void path_pending_dump(void)
+{
+    if (g_log_level < LOG_LEVEL_DEBUG) return;
+    time_t now = time(NULL);
+    int active = 0;
+    for (int i = 0; i < CE_PATH_MAX_PENDING; i++)
+        if (g_path_pending[i].active) active++;
+
+    LOG_DBG("path_pending_dump: %d/%d active, qso_counter=%d",
+            active, CE_PATH_MAX_PENDING, g_path_qso_counter);
+    for (int i = 0; i < CE_PATH_MAX_PENDING; i++) {
+        if (!g_path_pending[i].active) continue;
+        long age = (long)(now - g_path_pending[i].sent);
+        LOG_DBG("  [%2d] qso=%-5d kind=%s target=%-9s age=%lds (ttl=%lds)",
+                i,
+                g_path_pending[i].qso,
+                g_path_pending[i].kind == CE_PATH_KIND_TRACE
+                    ? "TRACE" : "ROUTE",
+                g_path_pending[i].target,
+                age,
+                (long)CE_PATH_TIMEOUT_SEC - age);
+    }
+}

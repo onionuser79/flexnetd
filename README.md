@@ -270,13 +270,54 @@ Syslog          yes             # Log to syslog (daemon mode)
 ### Command-line Options
 
 ```
-flexnetd [-c config] [-d] [-f] [-v[vv]] [-V]
+flexnetd [-c config] [-d] [-f] [-v[vv]] [-l logfile] [-V]
   -c file   Config file (default: /usr/local/etc/ax25/flexnetd.conf)
   -d        Daemon mode (fork, log to syslog)
   -f        Foreground mode (log to stderr)
   -v        Increase verbosity (repeat for more: -vvv = DEBUG)
+  -l file   Also write log to file (dual console + file output)
   -V        Print version and exit
 ```
+
+### Debug Build and M5.3 Testing
+
+For protocol-level testing of the path query protocol (M5.3) there is a
+debug binary with unoptimised symbols and a dedicated config template.
+
+```bash
+make debug                      # builds flexnetd_debug (no install)
+
+# Run in foreground with DEBUG log level, dual console + file, fast probes
+sudo /usr/local/sbin/flexnetd_debug -f -vvv \
+    -l /tmp/flexnetd_m53.log \
+    -c /usr/local/etc/ax25/flexnetd.conf.debug
+```
+
+`flexnetd.conf.debug` sets `PathProbeInterval 10` so probes go out every
+10 seconds rather than the 60-second production default.  Full table of
+200 destinations scans in ~33 minutes instead of ~3 hours.
+
+At DEBUG log level, every type-6 (outbound probe) and every type-7
+(inbound reply) frame is hex-dumped to the log.  The pending-query
+table is dumped every 30 seconds so you can see which probes are still
+in flight.
+
+```bash
+# Watch the live log
+tail -F /tmp/flexnetd_m53.log
+
+# Watch the cache fill up
+watch -n 1 'cat /usr/local/var/lib/ax25/flex/paths'
+
+# Query a specific destination
+flexdest -r ir5s
+```
+
+Typical sequence to observe:
+1. `TX type-6 probe`  hex-dump + `sent type-6 probe qso=N target=...`
+2. `RX type-7 reply`  hex-dump + `matches pending slot=X`
+3. `output_write_paths_cache_add: target=... kind=R hops=N`
+4. `flexdest -r <target>` prints the `*** route:` line
 
 ---
 

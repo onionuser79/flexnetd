@@ -267,17 +267,18 @@ static int run_native_ce_session(int fd)
             if (now - last_stats_write >= 30) {
                 output_write_linkstats();
                 path_pending_sweep();  /* expire stale in-flight queries */
+                path_pending_dump();   /* DEBUG-only: log table state */
                 last_stats_write = now;
             }
 
-            /* M5.3: Periodic type-6 path probe (once per ~60s).
+            /* M5.3: Periodic type-6 path probe (interval from config).
              * Round-robin through the dtable, sending one request per
              * interval.  Replies populate the path cache which flexdest
-             * reads with -r.  Skip destinations with recent cache hits
-             * is a future optimization.  Only start probing after the
-             * link is stable (routes exchanged). */
-            if (sent_routes && g_table.count > 0 &&
-                (now - last_probe_sent >= 60))
+             * reads with -r.  Only start probing after the link is
+             * stable (routes exchanged).  Interval of 0 disables. */
+            int probe_sec = g_cfg.path_probe_interval;
+            if (probe_sec > 0 && sent_routes && g_table.count > 0 &&
+                (now - last_probe_sent >= probe_sec))
             {
                 /* advance round-robin, skip unreachable entries */
                 int tries = 0;
@@ -308,13 +309,15 @@ static int run_native_ce_session(int fd)
                                                      qso, CE_PATH_KIND_ROUTE,
                                                      origin, target_call);
                     if (plen > 0) {
+                        hex_dump("TX type-6 probe", pbuf, plen);
                         ax25_send(fd, PID_CE, pbuf, plen);
                         g_link_stats.tx_bytes += plen;
                         g_link_stats.tx_frames++;
                         path_pending_add(qso, CE_PATH_KIND_ROUTE, target_call);
                         last_probe_sent = now;
                         LOG_INF("run_native_ce_session: sent type-6 "
-                                "probe qso=%d target=%s", qso, target_call);
+                                "probe qso=%d target=%s (%d bytes)",
+                                qso, target_call, plen);
                     }
                     break;
                 }
@@ -528,6 +531,7 @@ static int run_native_ce_session(int fd)
 
         /* Type-6: Route / Traceroute REQUEST (M5.3) */
         if (buf[0] == '6') {
+            hex_dump("RX type-6 request", buf, len);
             int qso = 0, kind = 0, hop_count = 0;
             char origin[MAX_CALLSIGN_LEN] = {0};
             char target[MAX_CALLSIGN_LEN] = {0};
@@ -548,6 +552,7 @@ static int run_native_ce_session(int fd)
                 if (strcasecmp(target, g_cfg.mycall) == 0 ||
                     strcasecmp(target, g_cfg.flex_listen_call) == 0)
                 {
+                    hex_dump("RX type-6 request (for us)", buf, len);
                     const char *our[1] = { g_cfg.flex_listen_call[0]
                                            ? g_cfg.flex_listen_call
                                            : g_cfg.mycall };
@@ -555,11 +560,13 @@ static int run_native_ce_session(int fd)
                     int rlen = ce_build_path_reply(rbuf, sizeof(rbuf),
                                                    qso, kind, our, 1);
                     if (rlen > 0) {
+                        hex_dump("TX type-7 reply", rbuf, rlen);
                         ax25_send(fd, PID_CE, rbuf, rlen);
                         g_link_stats.tx_bytes += rlen;
                         g_link_stats.tx_frames++;
                         LOG_INF("run_native_ce_session: sent type-7 "
-                                "reply (qso=%d, single-hop)", qso);
+                                "reply (qso=%d, single-hop, %d bytes)",
+                                qso, rlen);
                     }
                 } else {
                     /* Target is not us.  In single-neighbor setup we
@@ -579,6 +586,7 @@ static int run_native_ce_session(int fd)
 
         /* Type-7: Route / Traceroute REPLY (M5.3) */
         if (buf[0] == '7') {
+            hex_dump("RX type-7 reply", buf, len);
             PathReply reply;
             int pr = ce_parse_path_frame(buf, len, &reply,
                                          NULL, NULL, NULL, NULL, NULL);
@@ -588,18 +596,26 @@ static int run_native_ce_session(int fd)
                         reply.qso,
                         reply.kind == CE_PATH_KIND_TRACE ? "TRACE" : "ROUTE",
                         reply.hop_callsign_count);
+                for (int i = 0; i < reply.hop_callsign_count; i++)
+                    LOG_DBG("  hop[%d]=%s", i, reply.hop_callsigns[i]);
                 /* Match to outstanding query and clear pending */
                 int slot = path_pending_find(reply.qso);
                 if (slot >= 0) {
-                    LOG_INF("  matches pending target=%s",
-                            g_path_pending[slot].target);
+                    LOG_INF("  matches pending slot=%d target=%s "
+                            "(elapsed %ds)",
+                            slot, g_path_pending[slot].target,
+                            (int)(time(NULL) - g_path_pending[slot].sent));
                     path_pending_remove(reply.qso);
+                } else {
+                    LOG_WRN("  UNSOLICITED reply (qso=%d not pending)",
+                            reply.qso);
                 }
                 /* Cache the reply so flexdest can show it */
                 output_write_paths_cache_add(&reply);
             } else {
                 LOG_DBG("run_native_ce_session: type-7 parse failed "
                         "(len=%d)", len);
+                hex_dump("FAILED type-7 frame", buf, len);
             }
             t_start = time(NULL);
             continue;
