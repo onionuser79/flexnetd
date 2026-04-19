@@ -57,10 +57,28 @@ int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid)
     return CE_LINK_SETUP_LEN;
 }
 
-/* ── CE keepalive: '2' + 240 spaces = 241 bytes ─────────────────────── */
+/* ── CE keepalive: '2' + 237 spaces + '1' '0' '\r' = 241 bytes ─────── */
 /*
- * Wire format: 241-byte frame = '2' followed by 240 space chars.
- * No trailing '10\r' — that is a separate CE status frame.
+ * Wire format (from PROTOCOL_SPEC.md §CE type-2 — confirmed):
+ *   0x32 + 237x 0x20 + 0x31 0x30 0x0D
+ *
+ * The trailing 0x31 0x30 0x0D = "10\r" is an EMBEDDED link-time frame
+ * inside the keepalive (CE type-1 format: '1' <digit> '\r').  Strict
+ * peers — notably PCFlexnet — rely on this embedded link-time to
+ * update their smoothed RTT estimate of us.  Without it, PCFlexnet's
+ * RTT estimate never converges and saturates to 4095 (12-bit max),
+ * which is what the "tx 4095/2" value in its `l *` table reports.
+ *
+ * xnet is more tolerant because it has other RTT sources (its own
+ * keepalive every ~189s and NET/ROM L3RTT probes), so a malformed
+ * tail on our keepalives still converges its RTT via those paths.
+ *
+ * M6.8: fixed the tail — was 240 spaces (no link-time) before.
+ *
+ * Spec also mentions '11\r' and '12\r' as valid tails — the last
+ * digit is the sender's current link-time value in 100ms ticks.
+ * We use '0' for now (link time = 0); making it dynamic would be a
+ * follow-up once we're sure about the units.
  */
 int ce_build_keepalive(uint8_t *buf, int buflen)
 {
@@ -69,9 +87,13 @@ int ce_build_keepalive(uint8_t *buf, int buflen)
                 buflen, CE_KEEPALIVE_LEN);
         return -1;
     }
-    buf[0] = '2';
-    memset(buf + 1, ' ', 240);
-    LOG_DBG("ce_build_keepalive: built %d bytes", CE_KEEPALIVE_LEN);
+    buf[0]   = '2';                   /* keepalive marker */
+    memset(buf + 1, ' ', 237);        /* 237 padding spaces */
+    buf[238] = '1';                   /* embedded link-time prefix */
+    buf[239] = '0';                   /* link-time value = 0 ticks */
+    buf[240] = '\r';                  /* terminator */
+    LOG_DBG("ce_build_keepalive: built %d bytes (tail='10\\r')",
+            CE_KEEPALIVE_LEN);
     return CE_KEEPALIVE_LEN;
 }
 
