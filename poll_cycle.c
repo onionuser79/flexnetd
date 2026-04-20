@@ -298,6 +298,31 @@ static int run_native_ce_session(int fd)
     LOG_INF("run_native_ce_session: waiting for CE frames from %s",
             g_cfg.neighbor);
 
+    /*
+     * v0.7.1 fix — scrub any stale per-port destinations file left
+     * behind by a previous CE session on this port.  Without this,
+     * the M6.5 merge reads OLD routes from the on-disk file and
+     * presents them in the unified destinations as if they came from
+     * the current session.  Symptom: `fl` says dst=0 via this peer
+     * but `fld` lists 100+ routes Via this peer — from the previous
+     * session that did receive routes.
+     *
+     * Truncating to an empty file (rather than unlink) keeps the
+     * node/ownership stable; the next output_write_destinations()
+     * from this child rewrites it with fresh data.
+     */
+    if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports) {
+        char per_port[MAX_PATH_LEN + 24];
+        snprintf(per_port, sizeof(per_port), "%s.%s",
+                 g_cfg.dest_file, g_cfg.ports[g_port_idx].name);
+        FILE *pf = fopen(per_port, "w");
+        if (pf) {
+            fclose(pf);
+            LOG_DBG("run_native_ce_session: truncated stale per-port "
+                    "file '%s'", per_port);
+        }
+    }
+
     int     got_setup    = 0;
     int     merged_total = 0;
     time_t  t_start      = time(NULL);
