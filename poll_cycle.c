@@ -451,7 +451,16 @@ static int run_native_ce_session(int fd)
                 if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
-                    int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
+                    /* v0.7.1.1: send link-time value 0 (not 2).  Traced from
+                     * xnet<->pcf capture (2026-04-20): xnet sends "1" "0" "\r"
+                     * (value=0) as its link-time frame; pcf's smoothed formula
+                     * (peer_val + avg + 1) / 2 converges toward 1 with
+                     * peer_val=0 but stays at ~2 with our previous peer_val=2.
+                     * This is the single byte that makes xnet's row in pcf's
+                     * l* show "1/1" while ours stayed elevated.  See full
+                     * analysis in v0.7.2 TODO notes.
+                     */
+                    int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 0);
                     if (lt_len > 0) {
                         ax25_send(fd, PID_CE, lt_buf, lt_len);
                         g_link_stats.tx_bytes += lt_len;
@@ -672,8 +681,10 @@ static int run_native_ce_session(int fd)
                 if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
+                    /* v0.7.1.1: value 0 (was 2) — see poll_cycle.c:454 comment
+                     * and v0.7.2 TODO notes for full rationale. */
                     int lt_len = ce_build_link_time(lt_buf,
-                                    (int)sizeof(lt_buf), 2);
+                                    (int)sizeof(lt_buf), 0);
                     if (lt_len > 0) {
                         ax25_send(fd, PID_CE, lt_buf, lt_len);
                         g_link_stats.tx_bytes += lt_len;

@@ -1,8 +1,8 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.7.1 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.7.1.1 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.1-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.1)
+[![stable](https://img.shields.io/badge/release-v0.7.1.1-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.1.1)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,31 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.1.1 (2026-04-20)
+
+**Link-time value: "0" instead of "2".**
+
+Based on a 30-min xnet ↔ PCFlexnet L2 monitor capture taken directly
+on pcf's radio port.  The capture revealed that xnet's link-time
+frame carries value `0` (bytes `31 30 0D` = "1" "0" "\r"), not `2`
+like we had been sending (`31 32 0D` = "1" "2" "\r").
+
+PCFlexnet's smoothed-RTT formula at `flxnod32.dll` VA `0x100062CE`:
+
+    smoothed_new = (peer_val + avg + 1) / 2
+
+With `peer_val=0` this converges to `(avg+1)/2` → drives toward 1.
+With `peer_val=2` it converged to `(avg+3)/2` → stayed at 2+.
+This single digit accounted for the entire Q/T discrepancy between
+our row (elevated) and xnet's row (perfect `1/1`) in pcf's display.
+
+Two call sites updated in `poll_cycle.c` (proactive timer and
+reply-to-peer-keepalive branches).  No config changes.  Wire format
+unchanged (same 3-byte frame, different digit character).
+
+v0.7.2 TODO (documented in ROADMAP.md): link-time cadence mirroring,
+proactive `'3+'` with REJ tolerance, routing batches.
 
 ### v0.7.1 (2026-04-20)
 
