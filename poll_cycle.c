@@ -876,9 +876,12 @@ static int run_native_ce_session(int fd)
             }
 
             if (r == CE_FRAME_COMPACT) {
-                /* Multi-entry compact records: CALL(6)+SSID_LO+SSID_HI+RTT */
+                /* Multi-entry compact records: CALL(6)+SSID_LO+SSID_HI+RTT.
+                 * Pass g_port_idx so each entry is tagged with the port it
+                 * arrived on (v0.7.1 — fixes "Via always IW2OHX-14" bug). */
                 DestEntry entries[64];
-                int n = ce_parse_compact_records(buf, len, entries, 64);
+                int n = ce_parse_compact_records(buf, len, entries, 64,
+                                                 g_port_idx);
                 for (int i = 0; i < n; i++) {
                     if (dtable_merge(&entries[i]) > 0)
                         merged_total++;

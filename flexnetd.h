@@ -303,7 +303,8 @@ int ce_build_dest_broadcast(uint8_t *buf, int buflen,
 int ce_parse_frame(const uint8_t *data, int len,
                    char *callsign_out, int *ssid_out, int *rtt_out);
 int ce_parse_compact_records(const uint8_t *data, int len,
-                             DestEntry *out, int max_entries);
+                             DestEntry *out, int max_entries,
+                             int port_idx);
 int ce_parse_dest_broadcast(const uint8_t *data, int len,
                             int *rtt_out, char *callsign_out,
                             int *ssid_lo_out, int *ssid_hi_out,
