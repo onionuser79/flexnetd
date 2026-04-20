@@ -289,6 +289,16 @@ plus a timing refinement found during the v0.7.1 validation session.
 - **Xnet (IW2OHX-14)** — route exchange unchanged, `dst=1` stays
   stable via the periodic re-advertisement.
 
+**Known limitation — pcf-side displayed Q/T.**  RE of flxnod32.dll
+uncovered that pcf uses **multi-state `ts_ahead`** values (320 s in
+state 5, 180 s in states 2/3) so no single fixed interval on our
+side can produce clean 1-tick samples across all pcf states.  The
+current behaviour is ~75% state-5 samples (clean 1s and 100s) and
+~25% state-2/3 samples (4095 saturation due to delta overflow).
+**Impact is purely cosmetic on pcf's display** — all functional
+aspects (route exchange, stability, outbound routing) work correctly.
+An adaptive-interval scheduler is planned for v0.7.2.
+
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
 
 **Status:** Blocked — makes sense only with 2+ FlexNet ports.
