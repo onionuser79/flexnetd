@@ -328,6 +328,28 @@ static int run_native_ce_session(int fd)
     time_t  last_lt_tx       = (g_cfg.lt_reply_interval > 0)
                                 ? time(NULL) - g_cfg.lt_reply_interval
                                 : 0;
+    /*
+     * v0.7.1 timing fix: non-drifting link-time scheduler.
+     *
+     * Before: we gated on `now - last_lt_tx >= interval`.  Since the
+     * proactive timer only fires every 20 s, and last_lt_tx absorbs
+     * any late-fire drift (`last_lt_tx = now` after the send), each
+     * cycle can stretch from 320 s up to ~340 s.  At pcf, that 10-20 s
+     * slippage produces `delta = actual_interval - 320 = 10-20 s`
+     * samples (= 100-200 ticks) pinning its displayed RTT well above
+     * the ideal 1 tick.
+     *
+     * After: we track `next_lt_tx` as the absolute wall-clock time
+     * when the next link-time should fire.  On each send we advance
+     * `next_lt_tx += interval` (and catch up past `now` if we're late).
+     * This eliminates cumulative drift — sends land exactly one
+     * interval apart on the wall clock, independent of when the 20 s
+     * proactive timer happens to tick.
+     *
+     * Initial schedule: next_lt_tx = now, so the first send (during
+     * init handshake) passes immediately, same as the previous seed.
+     */
+    time_t  next_lt_tx       = time(NULL);
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
@@ -401,8 +423,7 @@ static int run_native_ce_session(int fd)
                  * xnet doesn't hit this because it initiates its own
                  * link-time exchanges on its cycle.  PCFlexnet only
                  * replies — so WE must respect the interval. */
-                if (g_cfg.lt_reply_interval <= 0 ||
-                    now - last_lt_tx >= g_cfg.lt_reply_interval)
+                if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
                     int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
@@ -413,14 +434,23 @@ static int run_native_ce_session(int fd)
                         clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
                         lt_sent_pending = 1;
                         last_lt_tx = now;
+                        /* Advance schedule by one interval.  If we fell
+                         * behind (now well past next_lt_tx), skip forward
+                         * to the next future slot — we don't burst. */
+                        if (g_cfg.lt_reply_interval > 0) {
+                            next_lt_tx += g_cfg.lt_reply_interval;
+                            while (next_lt_tx <= now)
+                                next_lt_tx += g_cfg.lt_reply_interval;
+                        }
                         LOG_DBG("run_native_ce_session: proactive link-time "
-                                "sent (interval=%ds)", g_cfg.lt_reply_interval);
+                                "sent (interval=%ds, next at +%lds)",
+                                g_cfg.lt_reply_interval,
+                                (long)(next_lt_tx - now));
                     }
                 } else {
                     LOG_DBG("run_native_ce_session: skipping proactive "
-                            "link-time (only %lds since last, "
-                            "need >= %ds)",
-                            (long)(now - last_lt_tx), g_cfg.lt_reply_interval);
+                            "link-time (%lds until next scheduled send)",
+                            (long)(next_lt_tx - now));
                 }
                 last_keepalive_tx = now;
             }
@@ -608,14 +638,13 @@ static int run_native_ce_session(int fd)
             /* Reset proactive-keepalive timer — we just sent one. */
             last_keepalive_tx = time(NULL);
 
-            /* M6.9: rate-limit link-time sends (see 20s-timer comment).
-             * PCFlexnet's ts-ahead logic causes our fast replies to produce
-             * a negative delta that clamps to 4095.  Wait until the
-             * configured interval has elapsed. */
+            /* M6.9 + v0.7.1 non-drift: piggy-back a link-time send here
+             * ONLY if the scheduled send time has arrived.  Uses the
+             * same `next_lt_tx` wall-clock schedule as the proactive
+             * timer branch so link-times never fire twice per window. */
             {
                 time_t now = time(NULL);
-                if (g_cfg.lt_reply_interval <= 0 ||
-                    now - last_lt_tx >= g_cfg.lt_reply_interval)
+                if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
                     int lt_len = ce_build_link_time(lt_buf,
@@ -627,12 +656,16 @@ static int run_native_ce_session(int fd)
                         clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
                         lt_sent_pending = 1;
                         last_lt_tx = now;
+                        if (g_cfg.lt_reply_interval > 0) {
+                            next_lt_tx += g_cfg.lt_reply_interval;
+                            while (next_lt_tx <= now)
+                                next_lt_tx += g_cfg.lt_reply_interval;
+                        }
                     }
                 } else {
                     LOG_DBG("run_native_ce_session: skipping link-time "
-                            "after peer keepalive (only %lds since last, "
-                            "need >= %ds)",
-                            (long)(now - last_lt_tx), g_cfg.lt_reply_interval);
+                            "after peer keepalive (%lds until next scheduled)",
+                            (long)(next_lt_tx - now));
                 }
             }
 
