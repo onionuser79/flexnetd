@@ -265,6 +265,13 @@ plus a timing refinement found during the v0.7.1 validation session.
   now land at exactly N × 320 s, giving clean 1-tick samples in
   pcf's RTT history instead of mixed 100/200 ticks.
 
+- **Gateways file — multi-port** (`7e5a57b`)
+  `output_write_gateways()` was still using the legacy single-port
+  fields and wrote only `ports[0]`.  Now iterates all configured
+  ports and emits one gateway line per port.  URONode can now
+  resolve routes advertised as `Via IW2OHX-12` (pcf) to the correct
+  outbound kernel interface.
+
 **Configuration impact (back-compat):**
 
 - Old configs without any `Port` lines continue to work unchanged

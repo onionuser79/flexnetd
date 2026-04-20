@@ -870,6 +870,17 @@ flexnetd was developed using a capture-driven approach:
   N × `LinkTimeReplyInterval` past session start, giving clean
   1-tick samples in pcf's RTT history instead of the mixed 100/200
   ticks previously observed.
+- **Gateways file — multi-port fix:** `output_write_gateways()` was
+  still using the legacy single-port fields, so the gateways file
+  listed only `ports[0]` regardless of how many `Port` blocks were
+  configured.  URONode then had no way to resolve routes advertised
+  as `Via IW2OHX-12` (pcf) and fell back to `IW2OHX-14` (xnet) or
+  failed outright.  Now iterates all configured ports:
+  ```
+  addr  callsign  dev  digipeaters
+  00000 IW2OHX-14 ax1 IW2OHX-3
+  00001 IW2OHX-12 ax2 IW2OHX-3
+  ```
 
 **Upgrade notes:**
 - `RouteAdvertInterval` default is now **0**.  If you were running
