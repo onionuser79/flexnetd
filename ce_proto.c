@@ -442,10 +442,19 @@ int ce_parse_frame(const uint8_t *data, int len,
  *
  * Trailing '-' before '\r' marks withdrawal (RTT = infinity for all).
  *
+ * port_idx: index into g_cfg.ports[] for the CE session that received
+ * this frame.  Each entry is tagged with this index so the output
+ * writer can render the correct "Via <port-neighbor>" for each route
+ * (v0.7.1 fix — previously all records landed with port=0 and thus
+ * rendered as "Via IW2OHX-14" regardless of actual source peer).
+ * Pass -1 to preserve legacy behavior (entry.port left at 0 after
+ * memset).
+ *
  * Returns number of entries parsed into out[], -1 on error.
  */
 int ce_parse_compact_records(const uint8_t *data, int len,
-                             DestEntry *out, int max_entries)
+                             DestEntry *out, int max_entries,
+                             int port_idx)
 {
     if (len < 4 || data[0] != '3') return -1;
 
@@ -519,6 +528,9 @@ int ce_parse_compact_records(const uint8_t *data, int len,
         out[count].ssid_hi     = ssid_hi;
         out[count].rtt         = rtt;
         out[count].is_infinity = (rtt >= RTT_INFINITY);
+        /* v0.7.1: tag this entry with the port it arrived on so the
+         * destinations file can show the correct Via neighbor */
+        out[count].port        = (port_idx >= 0) ? port_idx : 0;
 
         LOG_DBG("ce_parse_compact[%d]: %-9s %2d-%2d  %s",
                 count, call, ssid_lo, ssid_hi, rtt_str(rtt));

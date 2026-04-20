@@ -109,10 +109,23 @@ int output_write_destinations(void)
         snprintf(ssid_range, sizeof(ssid_range), "%d-%d",
                  e->ssid_lo, e->ssid_hi);
 
-        /* VIA: use via_callsign if set, otherwise fall back to
-         * the configured neighbor (all routes arrive through it) */
-        const char *via = e->via_callsign[0]
-                        ? e->via_callsign : g_cfg.neighbor;
+        /* VIA: resolution order —
+         *   1. explicit via_callsign (set by CE type-6 path queries)
+         *   2. per-port neighbor based on entry.port (set by compact-record
+         *      parser to match the CE session that received this route)
+         *   3. legacy global g_cfg.neighbor (= ports[0].neighbor) for
+         *      entries with no port/via context (e.g., D-command loads)
+         * v0.7.1 fix: step 2 is new; before, all compact-record entries
+         * defaulted to g_cfg.neighbor regardless of which peer sent them. */
+        const char *via;
+        if (e->via_callsign[0]) {
+            via = e->via_callsign;
+        } else if (e->port >= 0 && e->port < g_cfg.num_ports &&
+                   g_cfg.ports[e->port].neighbor[0]) {
+            via = g_cfg.ports[e->port].neighbor;
+        } else {
+            via = g_cfg.neighbor;
+        }
 
         fprintf(f, "%-9s %-5s %5d %-9s\n",
                 e->callsign, ssid_range, e->rtt, via);
