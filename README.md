@@ -894,6 +894,29 @@ flexnetd was developed using a capture-driven approach:
   lines without the 4th field inherit the global
   `RouteAdvertInterval` (now 0 by default).
 
+**Known cosmetic limitation — pcf-side Q/T display:**
+
+PCFlexnet's `l *` display for our row may show a periodically-elevated
+Q/T value (e.g. `(1143/2)` at ~1 h uptime) even when the link is
+fully functional.  RE of `flxnod32.dll` revealed that pcf uses
+**different `ts_ahead` windows in different states of its state
+machine** (320 s in state 5, 180 s in states 2/3, 0 s in state 6).
+A fixed-interval scheduler on our side — like our current 320 s
+`LinkTimeReplyInterval` — is optimal for state-5 windows (producing
+clean 1-tick samples) but produces delta overflow (→ 4095 saturation)
+when our send happens to land in a state-2/3 window (where pcf
+expects 180 s intervals).
+
+Impact: **purely cosmetic on pcf's display**.  Route exchange,
+session stability, destination merging and outbound connections via
+pcf all work correctly.  xnet (ARM) does not exhibit this pattern
+and converges cleanly to `Q/T=1`.
+
+Planned for v0.7.2: adaptive `LinkTimeReplyInterval` that reads pcf's
+own reported smoothed RTT from its link-time frames and shrinks/grows
+our send interval accordingly, aiming for delta=0 across all pcf
+states.
+
 ### v0.7.0 (2026-04-19)
 
 **M6 — Multi-port, multi-neighbor support + PCFlexnet interop:**
