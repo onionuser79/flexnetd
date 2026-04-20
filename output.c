@@ -80,68 +80,275 @@ int output_write_gateways(void)
     return 0;
 }
 
-int output_write_destinations(void)
+/*
+ * format_dest_row — render one destination entry as a text line.
+ * Used by both the per-port write and the merge.
+ *
+ * Output (padded, fixed-width for readability):
+ *   "%-9s %-5s %5d %-9s\n"  -> "DK0WUE    0-13    219 IW2OHX-12\n"
+ */
+static int format_dest_row(char *out, int outlen, const DestEntry *e)
 {
+    char ssid_range[12];
+    snprintf(ssid_range, sizeof(ssid_range), "%d-%d",
+             e->ssid_lo, e->ssid_hi);
+
+    /* VIA: resolution order —
+     *   1. explicit via_callsign (set by CE type-6 path queries)
+     *   2. per-port neighbor based on entry.port (set by compact-record
+     *      parser to match the CE session that received this route)
+     *   3. legacy global g_cfg.neighbor (= ports[0].neighbor) for
+     *      entries with no port/via context (e.g., D-command loads)
+     * v0.7.1 fix: step 2 is new; before, all compact-record entries
+     * defaulted to g_cfg.neighbor regardless of which peer sent them. */
+    const char *via;
+    if (e->via_callsign[0]) {
+        via = e->via_callsign;
+    } else if (e->port >= 0 && e->port < g_cfg.num_ports &&
+               g_cfg.ports[e->port].neighbor[0]) {
+        via = g_cfg.ports[e->port].neighbor;
+    } else {
+        via = g_cfg.neighbor;
+    }
+
+    return snprintf(out, (size_t)outlen, "%-9s %-5s %5d %-9s\n",
+                    e->callsign, ssid_range, e->rtt, via);
+}
+
+/*
+ * destinations_merge — read the per-port destinations files
+ * (destinations.<port>) and produce a single unified destinations file.
+ *
+ * Merge rule: for each (callsign, ssid_range) key, keep the row with
+ * the LOWEST RTT.  When RTTs tie, keep the first one seen (stable).
+ * This mirrors best-path routing — users following our destinations
+ * file connect through whichever peer has the shorter RTT.
+ *
+ * Serialised via flock on a sibling .lock file.
+ *
+ * File layout (M6.5):
+ *   destinations.xnet   ← written by CE child for port xnet (g_port_idx=0)
+ *   destinations.pcf    ← written by CE child for port pcf  (g_port_idx=1)
+ *   destinations        ← merged, with header
+ *   destinations.lock   ← flock sentinel
+ */
+
+#define DEST_MERGE_MAX  2048
+typedef struct {
+    char call[MAX_CALLSIGN_LEN];
+    char ssid_range[12];
+    int  rtt;
+    char via[MAX_CALLSIGN_LEN];
+} MergedDestRow;
+
+static int merge_dest_cmp_key(const MergedDestRow *a, const MergedDestRow *b)
+{
+    int r = strcmp(a->call, b->call);
+    if (r != 0) return r;
+    return strcmp(a->ssid_range, b->ssid_range);
+}
+
+static int merge_dest_sort_cmp(const void *a, const void *b)
+{
+    return merge_dest_cmp_key((const MergedDestRow *)a,
+                              (const MergedDestRow *)b);
+}
+
+static int destinations_merge(void)
+{
+    char lock_path[MAX_PATH_LEN + 8];
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", g_cfg.dest_file);
+    int lfd = open(lock_path, O_CREAT | O_WRONLY, 0644);
+    if (lfd < 0) {
+        LOG_ERR("destinations_merge: open lock '%s': %s",
+                lock_path, strerror(errno));
+        return -1;
+    }
+    if (flock(lfd, LOCK_EX) < 0) {
+        LOG_ERR("destinations_merge: flock: %s", strerror(errno));
+        close(lfd);
+        return -1;
+    }
+
+    /* Accumulate best-rtt rows in memory, keyed by (call, ssid_range). */
+    static MergedDestRow rows[DEST_MERGE_MAX];
+    int nrows = 0;
+
+    for (int i = 0; i < g_cfg.num_ports; i++) {
+        char per_port[MAX_PATH_LEN + 24];
+        snprintf(per_port, sizeof(per_port), "%s.%s",
+                 g_cfg.dest_file, g_cfg.ports[i].name);
+        FILE *pf = fopen(per_port, "r");
+        if (!pf) continue;
+
+        char line[256];
+        while (fgets(line, sizeof(line), pf)) {
+            /* skip header line */
+            if (!strncmp(line, "Dest ", 5)) continue;
+
+            MergedDestRow r;
+            memset(&r, 0, sizeof(r));
+            int rtt = 0;
+            /* tolerate variable whitespace via sscanf */
+            if (sscanf(line, "%9s %11s %d %9s",
+                       r.call, r.ssid_range, &rtt, r.via) != 4)
+                continue;
+            r.rtt = rtt;
+
+            /* look up existing key */
+            int slot = -1;
+            for (int k = 0; k < nrows; k++) {
+                if (merge_dest_cmp_key(&rows[k], &r) == 0) { slot = k; break; }
+            }
+            if (slot < 0) {
+                if (nrows >= DEST_MERGE_MAX) {
+                    LOG_WRN("destinations_merge: row buffer full "
+                            "(MAX=%d), dropping remaining", DEST_MERGE_MAX);
+                    break;
+                }
+                rows[nrows++] = r;
+            } else if (r.rtt < rows[slot].rtt) {
+                /* better path via this peer — replace */
+                rows[slot] = r;
+            }
+            /* else: keep existing (lower or equal RTT) */
+        }
+        fclose(pf);
+    }
+
+    /* Sort for deterministic output */
+    if (nrows > 1)
+        qsort(rows, (size_t)nrows, sizeof(MergedDestRow),
+              merge_dest_sort_cmp);
+
+    /* Write unified file atomically */
     char tmp[MAX_PATH_LEN + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", g_cfg.dest_file);
-
-    LOG_INF("output_write_destinations: writing to %s", g_cfg.dest_file);
-
-    dtable_sort();
-
     FILE *f = fopen(tmp, "w");
     if (!f) {
-        LOG_ERR("output_write_destinations: cannot open '%s': %s",
+        LOG_ERR("destinations_merge: cannot open '%s': %s",
                 tmp, strerror(errno));
+        flock(lfd, LOCK_UN); close(lfd);
         return -1;
     }
 
     fprintf(f, "Dest     SSID    RTT Via\n");
-
-    int written = 0, skipped = 0;
-
-    for (int i = 0; i < g_table.count; i++) {
-        DestEntry *e = &g_table.entries[i];
-
-        if (e->rtt >= g_cfg.infinity) { skipped++; continue; }
-
-        char ssid_range[12];
-        snprintf(ssid_range, sizeof(ssid_range), "%d-%d",
-                 e->ssid_lo, e->ssid_hi);
-
-        /* VIA: resolution order —
-         *   1. explicit via_callsign (set by CE type-6 path queries)
-         *   2. per-port neighbor based on entry.port (set by compact-record
-         *      parser to match the CE session that received this route)
-         *   3. legacy global g_cfg.neighbor (= ports[0].neighbor) for
-         *      entries with no port/via context (e.g., D-command loads)
-         * v0.7.1 fix: step 2 is new; before, all compact-record entries
-         * defaulted to g_cfg.neighbor regardless of which peer sent them. */
-        const char *via;
-        if (e->via_callsign[0]) {
-            via = e->via_callsign;
-        } else if (e->port >= 0 && e->port < g_cfg.num_ports &&
-                   g_cfg.ports[e->port].neighbor[0]) {
-            via = g_cfg.ports[e->port].neighbor;
-        } else {
-            via = g_cfg.neighbor;
-        }
-
+    for (int i = 0; i < nrows; i++) {
         fprintf(f, "%-9s %-5s %5d %-9s\n",
-                e->callsign, ssid_range, e->rtt, via);
-        written++;
+                rows[i].call, rows[i].ssid_range, rows[i].rtt, rows[i].via);
     }
-
     fclose(f);
 
     if (rename(tmp, g_cfg.dest_file) < 0) {
-        LOG_ERR("output_write_destinations: rename failed: %s", strerror(errno));
+        LOG_ERR("destinations_merge: rename: %s", strerror(errno));
         unlink(tmp);
+        flock(lfd, LOCK_UN); close(lfd);
         return -1;
     }
 
-    LOG_INF("output_write_destinations: written=%d skipped=%d(infinity)",
-            written, skipped);
+    LOG_DBG("destinations_merge: wrote unified file with %d row%s "
+            "(merged from %d ports)",
+            nrows, nrows == 1 ? "" : "s", g_cfg.num_ports);
+    flock(lfd, LOCK_UN);
+    close(lfd);
+    return 0;
+}
+
+/*
+ * output_write_destinations — called by each CE child whenever its
+ * local dtable changes (new routes received).
+ *
+ * M6.5 (v0.7.1): the child writes a per-port file
+ * `destinations.<port_name>` containing its own dtable, then calls
+ * destinations_merge() which reads ALL per-port files and produces
+ * the unified `destinations` with best-RTT winners per destination.
+ *
+ * Two CE children peering with different neighbors no longer clobber
+ * each other — whichever peer has the shorter RTT to a given destination
+ * wins in the unified output, and both peers' unique routes are
+ * represented.  Example: `Via IW2OHX-12` for routes where pcf is faster,
+ * `Via IW2OHX-14` for routes where xnet is faster.
+ *
+ * Single-port / legacy fallback: if g_port_idx is invalid, write
+ * directly to the unified file (preserving v0.6.0 behaviour).
+ */
+int output_write_destinations(void)
+{
+    dtable_sort();
+
+    /* Legacy / parent fallback: no port context → write unified directly. */
+    if (g_port_idx < 0 || g_port_idx >= g_cfg.num_ports) {
+        char tmp[MAX_PATH_LEN + 8];
+        snprintf(tmp, sizeof(tmp), "%s.tmp", g_cfg.dest_file);
+        LOG_INF("output_write_destinations: writing to %s (legacy)",
+                g_cfg.dest_file);
+        FILE *f = fopen(tmp, "w");
+        if (!f) {
+            LOG_ERR("output_write_destinations: cannot open '%s': %s",
+                    tmp, strerror(errno));
+            return -1;
+        }
+        fprintf(f, "Dest     SSID    RTT Via\n");
+        int written = 0, skipped = 0;
+        for (int i = 0; i < g_table.count; i++) {
+            DestEntry *e = &g_table.entries[i];
+            if (e->rtt >= g_cfg.infinity) { skipped++; continue; }
+            char row[256];
+            format_dest_row(row, sizeof(row), e);
+            fputs(row, f);
+            written++;
+        }
+        fclose(f);
+        if (rename(tmp, g_cfg.dest_file) < 0) {
+            LOG_ERR("output_write_destinations: rename: %s", strerror(errno));
+            unlink(tmp);
+            return -1;
+        }
+        LOG_INF("output_write_destinations: written=%d skipped=%d(infinity)",
+                written, skipped);
+        return 0;
+    }
+
+    /* Multi-port path: write per-port file + merge unified */
+    const PortCfg *pc = &g_cfg.ports[g_port_idx];
+
+    char per_port[MAX_PATH_LEN + 24];
+    char per_tmp[MAX_PATH_LEN + 32];
+    snprintf(per_port, sizeof(per_port), "%s.%s",
+             g_cfg.dest_file, pc->name);
+    snprintf(per_tmp, sizeof(per_tmp), "%s.tmp", per_port);
+
+    FILE *pf = fopen(per_tmp, "w");
+    if (!pf) {
+        LOG_ERR("output_write_destinations: per-port '%s': %s",
+                per_tmp, strerror(errno));
+        return -1;
+    }
+    /* Header goes in the per-port file too — makes it readable standalone
+     * and the merge skips any "Dest " line. */
+    fprintf(pf, "Dest     SSID    RTT Via\n");
+    int written = 0, skipped = 0;
+    for (int i = 0; i < g_table.count; i++) {
+        DestEntry *e = &g_table.entries[i];
+        if (e->rtt >= g_cfg.infinity) { skipped++; continue; }
+        char row[256];
+        format_dest_row(row, sizeof(row), e);
+        fputs(row, pf);
+        written++;
+    }
+    fclose(pf);
+    if (rename(per_tmp, per_port) < 0) {
+        LOG_ERR("output_write_destinations: rename per-port: %s",
+                strerror(errno));
+        unlink(per_tmp);
+        return -1;
+    }
+
+    /* Merge all per-port files into the unified output */
+    destinations_merge();
+
+    LOG_INF("output_write_destinations: port=%s written=%d skipped=%d(infinity)",
+            pc->name, written, skipped);
     return 0;
 }
 
