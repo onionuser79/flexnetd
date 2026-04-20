@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.1 (stable)
+**Current version:** v0.7.1.1 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -299,6 +299,90 @@ current behaviour is ~75% state-5 samples (clean 1s and 100s) and
 aspects (route exchange, stability, outbound routing) work correctly.
 An adaptive-interval scheduler is planned for v0.7.2.
 
+### v0.7.1.1 — link-time value fix (2026-04-20, stable)
+
+Patch release based on a xnet ↔ pcf L2 capture (30 min of monitor
+traffic on pcf's radio port).
+
+**Finding:** xnet sends its link-time frame with value **"0"** (bytes
+`31 30 0D` = "1" "0" "\r") whereas we were sending value **"2"**
+(bytes `31 32 0D` = "1" "2" "\r").  pcf's smoothed-RTT formula
+(per caller 1 at VA 0x100062CE in flxnod32.dll):
+
+    smoothed_new = (peer_val + avg + 1) / 2
+
+With `peer_val=0` this converges to `(avg+1)/2` → tends toward 1.
+With `peer_val=2` this stays near `(avg+3)/2` → tends toward 2+.
+This single-byte difference explains why xnet's row in pcf's `l *`
+converges to `1/1` while ours stayed elevated around `1062`.
+
+**Change:** two call sites in poll_cycle.c updated:
+- line 454 (proactive timer branch)
+- line 676 (reply-to-peer-keepalive branch)
+
+Both now call `ce_build_link_time(..., 0)` instead of `..., 2`.
+
+No config changes.  No wire-format changes (same 3-byte frame format,
+different digit character).  Minimal risk; back-compatible with xnet.
+
+### v0.7.2 — M6 final fine-tuning (PLANNED)
+
+Follow-on work identified during the v0.7.1 production deployment
+and the xnet ↔ pcf capture analysis.  All items are ranked by
+expected impact on pcf's displayed Q/T convergence.
+
+**Priority A — link-time cadence mirroring xnet**
+
+Xnet sends only TWO link-time frames in a 30-minute window:
+  - At session init with value "600" (infinity sentinel)
+  - Once shortly after, with value "0"
+
+Then xnet goes silent on link-time for the rest of the session.
+Our current code sends every `LinkTimeReplyInterval` (default 320s).
+pcf's state machine updates its smoothed on every link-time receipt,
+and each such update can kick it between states 2/3/5 with
+different ts_ahead (180s vs 320s), causing the 4095/100/1 mix we
+observe.
+
+Proposed fix: send link-time only at session init (+ optionally one
+follow-up after first pcf keepalive) then stop.  Remove the 320s
+proactive timer entirely or make it opt-in via config.
+
+**Priority B — re-enable proactive `'3+'` tokens (with REJ tolerance)**
+
+In the capture, both xnet AND pcf send `'3+'` proactively.  pcf
+occasionally REJects xnet's `'3+'` (at t=0.48s: `REJ2-`) but xnet
+simply ignores the REJ and continues normally — no DISC triggered.
+
+Our v0.7.1 approach of disabling proactive `'3+'` (`route_advert=0`
+on the pcf port) was over-defensive.  Restoring proactive `'3+'`
+with explicit REJ handling (don't DISC on REJ, just back off briefly
+and retry) should re-enable periodic route re-advertisement to pcf
+and keep our route fresh in pcf's tables.
+
+**Priority C — send routing batches (multi-record 240-byte frames)**
+
+Xnet sends `len=242` compact-record frames packed with ~15-20 routes
+per frame, multiple times per minute.  We currently send only
+single-record 12-byte frames on pcf's `'3+'` request.
+
+Proposed: batch our d-table into 240-byte frames and send periodically
+(e.g. every 60s) matching xnet's cadence.
+
+**Priority D — state-6 investigation (stretch)**
+
+The 4095 samples in pcf's history for us correspond to state-2/3
+windows where pcf's ts_ahead is 180s but we send at 320s intervals.
+If we can trigger pcf into state 6 (where ts_ahead=0s, per VA
+0x100067A6), our sends will always produce delta=0 → stored as 1.
+Needs more RE to understand state transition triggers.
+
+**Input:** flexnet_capture_port1.json (30 min xnet↔pcf radio capture,
+2026-04-20, 61 xnet↔pcf frames across 300 total).
+
+**Output goal:** pcf's `l *` row for IW2OHX 3-3 converges to `1/1`
+matching how it displays xnet and all other local peers.
+
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
 
 **Status:** Blocked — makes sense only with 2+ FlexNet ports.
@@ -370,6 +454,8 @@ confirmed wire protocol.
 | v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
 | v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop + RE of flxnod32.dll | **Stable** |
 | v0.7.1 | M6 fine-tuning — per-port route_advert, M6.5 destinations merge, non-drift timing | **Stable** |
+| v0.7.1.1 | Link-time value 2→0 (pcf smoothed convergence fix) | **Stable** |
+| v0.7.2 | Link-time cadence, proactive '3+' with REJ tolerance, routing batches | Planned |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
