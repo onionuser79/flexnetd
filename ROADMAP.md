@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.0 (stable)
+**Current version:** v0.7.1 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -167,17 +167,7 @@ reverse-engineering effort to decode `flxnod32.dll`'s state machine.
 - xnet's ARM implementation is more permissive and tolerates our
   older behaviour; the fixes above don't regress xnet's peering.
 
-**Fine-tuning still open (moved to v0.7.1 planning):**
-- Occasional DM events when both ports are under simultaneous load —
-  need synchronised listen captures on `ax1` (xnet) and `ax2` (pcf)
-  to correlate L2 events across ports.
-- The `destinations` file doesn't surface pcf's routes as `Via
-  IW2OHX-12` even when pcf's advertised RTT is lower than xnet's —
-  probably a bug in `ce_parse_compact_records` / `dtable_merge`
-  around the per-neighbor `via_callsign` field.
-- The `RouteAdvertInterval` (60 s) and `LinkTimeReplyInterval` (320 s)
-  defaults work but aren't adaptive; a future M6.10 could read the
-  peer's reported smoothed and adjust interval.
+**v0.7.1 addressed all three open items above — see its section below.**
 
 **Original scope (all delivered):**
 
@@ -232,6 +222,65 @@ Each child fork already has a private dtable today, which actually
 *helps* multi-neighbor: no shared-state locking needed inside the
 CE handler.  The only cross-child concern is the destinations file,
 solved by per-child snapshot + parent-side merge (M6.5).
+
+### v0.7.1 — M6 fine-tuning, dual-peer production-ready (2026-04-20, stable)
+
+**Shipped.**  Addresses the three open items flagged at end of v0.7.0
+plus a timing refinement found during the v0.7.1 validation session.
+
+**Fixes delivered:**
+
+- **Priority 1 — via-field tag on compact records** (`e4f42d8`)
+  `ce_parse_compact_records()` gains a `port_idx` parameter; each
+  parsed entry is tagged with the port it arrived on.  `output.c`
+  resolves `Via` via `g_cfg.ports[port].neighbor` instead of the
+  legacy `g_cfg.neighbor`.
+
+- **Priority 2 — per-port `RouteAdvertInterval`** (`efeaef5`)
+  `PortCfg` gains its own `route_advert_interval` field.  Config
+  parser accepts an optional 4th field on `Port` lines
+  (`route_advert=<seconds>`).  Global default changed to **0**
+  (disabled) — required for PCFlexnet compatibility.  Xnet users
+  set `route_advert=60` on their port.  Traced the pcf DM chain
+  to flxnod32.dll VA 0x100063C5 (compact-record handler tears
+  down L2 when token state is 0).
+
+- **Priority 3 — solved indirectly by Priority 2.**  The "pcf stops
+  advertising after reconnect" symptom was a consequence of the DM
+  cycle, not a separate bug.  With DMs eliminated, pcf's one-shot
+  `'3+'` + route-send at session init is sufficient for the lifetime
+  of the (now indefinite) session.
+
+- **Priority 4 / M6.5 — per-port destinations + flock merge** (`2371865`)
+  Same pattern M6.6 applied to linkstats.  Each CE child writes
+  `destinations.<port>` with its own dtable; `destinations_merge()`
+  runs under flock, picks best-RTT-per-key across peers, writes
+  unified `destinations` with a mix of `Via IW2OHX-12` and
+  `Via IW2OHX-14` as appropriate.
+
+- **Timing — non-drifting link-time scheduler** (`2f44e8c`)
+  Switched the `LinkTimeReplyInterval` gate from "elapsed-since-last"
+  to an absolute wall-clock schedule (`next_lt_tx = last + interval`).
+  Drift from the 20 s proactive timer no longer accumulates; sends
+  now land at exactly N × 320 s, giving clean 1-tick samples in
+  pcf's RTT history instead of mixed 100/200 ticks.
+
+**Configuration impact (back-compat):**
+
+- Old configs without any `Port` lines continue to work unchanged
+  (legacy flat keywords synthesise `ports[0]`).
+- Old configs WITH `Port` lines get the new default `route_advert=0`
+  globally — xnet users should add `route_advert=60` to their xnet
+  `Port` line to keep pre-v0.7.1 behaviour.
+- New files appear in `/usr/local/var/lib/ax25/flex/`:
+  `destinations.<port>`, `destinations.lock` (managed by flexnetd;
+  no manual setup).
+
+**Verified against production peers:**
+- **Pcf (IW2OHX-12)** — session stable indefinitely, route exchange
+  completes, ~100-120 routes via pcf in the unified output.
+- **Xnet (IW2OHX-14)** — route exchange unchanged, `dst=1` stays
+  stable via the periodic re-advertisement.
 
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
 
@@ -303,7 +352,7 @@ confirmed wire protocol.
 | v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
 | v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
 | v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop + RE of flxnod32.dll | **Stable** |
-| v0.7.1 | M6 fine-tuning — simultaneous-load stability, adaptive intervals, destinations-file via-field | Planned |
+| v0.7.1 | M6 fine-tuning — per-port route_advert, M6.5 destinations merge, non-drift timing | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 

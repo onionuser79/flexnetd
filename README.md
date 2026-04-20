@@ -1,8 +1,8 @@
 # flexnetd - FlexNet Routing Daemon for Linux AX.25
 
-**Version 0.7.0 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
+**Version 0.7.1 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.0-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.0)
+[![stable](https://img.shields.io/badge/release-v0.7.1-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.1)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -258,15 +258,44 @@ FlexListenCall  IW2OHX-3        # Callsign to bind on this port
 #
 # Port xnet  IW2OHX-14  IW2OHX-3
 # Port pcf   IW2OHX-12  IW2OHX-3
+#
+# 3) Multi-port with per-port overrides (v0.7.1+):
+#    Optional 4th field overrides the global RouteAdvertInterval for
+#    THIS port only.  Use "route_advert=<seconds>" or bare integer.
+#    Different FlexNet implementations have different tolerances for
+#    unsolicited compact records — see v0.7.1 changelog.
+#
+# Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60
+# Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0
 
 # Timers
 PollInterval    240             # Client mode: seconds between D-cmd polls
 KeepaliveInterval  90           # Keepalive cycle (seconds)
 BeaconInterval  120             # Beacon interval (seconds)
 
+# M6.7: seconds between periodic re-advertisements of our own routes
+# to each FlexNet peer (prevents our callsign aging out of their tables).
+#   0  — DISABLED (default since v0.7.1; safe for PCFlexnet, required
+#        for compatibility — PCFlexnet DMs the L2 link on unsolicited
+#        compact records)
+#   60 — re-advertise every 60 s (works fine with xnet; PCFlexnet will
+#        DM the link if this is enabled on its port)
+# Prefer per-port overrides via the "route_advert" field on Port lines.
+RouteAdvertInterval  0
+
+# M6.9: seconds between link-time frames we send to each peer.
+# Matches PCFlexnet's internal ts-ahead window (VA 0x100062FF = now + 320s).
+# Sending faster produces negative deltas that saturate pcf's 12-bit
+# RTT field at 4095.  Set to 0 to disable rate-limiting.
+LinkTimeReplyInterval  320
+
 # Output files (URONode reads these)
 GatewaysFile    /usr/local/var/lib/ax25/flex/gateways
 DestFile        /usr/local/var/lib/ax25/flex/destinations
+# v0.7.1: per-port files appear alongside the unified dest_file —
+#   destinations.<port>  — one per CE session
+#   destinations.lock    — flock sentinel for the merge
+# These are managed by flexnetd; no manual setup needed.
 
 # Protocol
 Infinity        60000           # RTT value = unreachable
@@ -700,7 +729,8 @@ that exec URONode must NOT have PIDINCL enabled (it corrupts text I/O).
 
 ## 8. Output Files
 
-flexnetd writes two files that URONode reads for FlexNet routing:
+flexnetd writes four files that URONode / flexdest / operators read for
+FlexNet routing state:
 
 ### Gateways File
 
@@ -723,16 +753,48 @@ Default: `/usr/local/var/lib/ax25/flex/destinations`
 
 ```
 Dest     SSID    RTT Via
-DB0AAT    0-9        7 IR3UHU-2
-DK0WUE    0-13       2 IW2OHX-14
+DB0AAT    0-9        7 IW2OHX-12
+DK0WUE    0-13       2 IW2OHX-12
+IR3UHU    1-1       88 IW2OHX-14
 IW2OHX    3-3        1 IW2OHX-14
 ...
 ```
 
-Updated atomically (write to `.tmp`, then `rename()`) every 60 seconds
-during active CE sessions. Entries with RTT >= Infinity (60000) are
-filtered out. The VIA field shows the next-hop callsign from the CE
-routing data (falls back to the configured neighbor if not specified).
+Written atomically (write to `.tmp`, then `rename()`) on every incoming
+compact-routing frame. Entries with RTT >= `Infinity` (60000) are filtered
+out. The VIA field shows the next-hop callsign from the CE routing data
+(falls back to the per-port neighbor if not specified).
+
+**v0.7.1 multi-port merge (M6.5):** When multiple CE children are active
+(one per configured Port), each writes its own
+`destinations.<port_name>` file (e.g. `destinations.xnet`,
+`destinations.pcf`) with its view of the table.  A `flock`-serialised
+merge produces the unified `destinations` file by picking, for each
+(callsign, SSID range) pair, the entry with the **lowest RTT** across
+all peers.  This means users see the best available path in the
+single unified file:
+
+- Routes with shorter RTT via pcf → `Via IW2OHX-12`
+- Routes with shorter RTT via xnet → `Via IW2OHX-14`
+- Routes known only to one peer → that peer's `Via`
+
+A `destinations.lock` file is created alongside for the flock sentinel.
+
+### Linkstats File
+
+Default: `/usr/local/var/lib/ax25/flex/linkstats`
+
+One row per active CE peering, L-table format (matches xnet's `l` output).
+Multi-port deployments use per-port files + flock merge, same pattern as
+destinations (M6.6).
+
+### Paths File (M5.3)
+
+Default: `/usr/local/var/lib/ax25/flex/paths`
+
+In-memory cache of CE type-7 (Route/Traceroute REPLY) responses, flushed
+to disk on each new reply. Consumed by `flexdest -r <callsign>` to show
+the recorded hop chain to a destination.
 
 ---
 
@@ -769,6 +831,57 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.1 (2026-04-20)
+
+**M6 fine-tuning and production-readiness for dual-peer deployments.**
+
+- **Priority 1 — via-field fix:** compact routing records received from
+  each peer are now tagged with their arrival port index so the
+  `destinations` file shows the correct `Via <neighbor>` per entry.
+  `ce_parse_compact_records()` gains a `port_idx` parameter; `output.c`
+  resolves `Via` via `g_cfg.ports[port].neighbor` instead of always
+  falling back to the legacy `g_cfg.neighbor`.
+- **Priority 2 — per-port `RouteAdvertInterval`:** after tracing L2
+  DM events to the M6.7 periodic re-advertisement, the `PortCfg`
+  struct gains its own `route_advert_interval` field.  The config
+  parser accepts an optional 4th field on `Port` lines
+  (`route_advert=<seconds>`).  Global default changed to **0**
+  (disabled) — required for PCFlexnet compatibility, since
+  PCFlexnet's `flxnod32.dll` at VA 0x100063C5 tears down the L2 link
+  within 10–15 ms of receiving any unsolicited compact record.
+  Xnet (ARM) is tolerant — set `route_advert=60` on its port to
+  prevent xnet aging our route out at ~120 s.
+- **Priority 3 — solved indirectly by Priority 2:** the "pcf stops
+  advertising after reconnect" symptom was a consequence of the DM
+  cycle, not a separate bug.  With DMs eliminated, pcf's one-shot
+  `'3+'` + route-send at session init now remains sufficient for the
+  lifetime of the (now-indefinite) session.
+- **M6.5 / Priority 4 — per-port destinations + flock merge:**
+  `destinations.<port>` files written by each CE child, merged into
+  the unified `destinations` via `flock` with best-RTT-per-key
+  semantics.  Users see `Via IW2OHX-12` for routes where pcf is
+  faster, `Via IW2OHX-14` for routes where xnet is faster, in a
+  single coherent output.  Same pattern as M6.6 linkstats.
+- **Timing — non-drifting link-time scheduler:** the rate-limit gate
+  switched from "elapsed-since-last" to absolute-schedule
+  (`next_lt_tx = last + interval`).  Drift from the 20 s proactive
+  timer no longer accumulates; link-time sends now land at exactly
+  N × `LinkTimeReplyInterval` past session start, giving clean
+  1-tick samples in pcf's RTT history instead of the mixed 100/200
+  ticks previously observed.
+
+**Upgrade notes:**
+- `RouteAdvertInterval` default is now **0**.  If you were running
+  v0.7.0 with the previous default of 60 and want to keep that
+  behavior for xnet, add `route_advert=60` to the xnet `Port` line.
+- New files appear in `/usr/local/var/lib/ax25/flex/`:
+  `destinations.<port>` and `destinations.lock` alongside the
+  unified `destinations`.  These are managed by flexnetd; no manual
+  action needed.
+- Configuration syntax is backward-compatible; existing `Port`
+  lines without the 4th field inherit the global
+  `RouteAdvertInterval` (now 0 by default).
 
 ### v0.7.0 (2026-04-19)
 
