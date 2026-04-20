@@ -24,11 +24,17 @@ MaxSSID         3
 
 Role            server
 
-# ── FlexNet ports (M6 multi-port syntax demo) ────────────────────────
-# Single-port debug setup; add more Port lines to exercise M6.
-Port xnet  IW2OHX-14  IW2OHX-3
-# Uncomment for a second FlexNet peering (when available):
-# Port pcf   IW2OHX-12  IW2OHX-3
+# ── FlexNet ports (M6 multi-port syntax) ─────────────────────────────
+# Optional 4th field: route_advert=<seconds> overrides the global
+# RouteAdvertInterval for THIS port only.
+#   route_advert=0   disables M6.7 periodic re-advertisement on this port
+#   route_advert=60  re-advertise our route every 60s
+#
+# Recommendation based on 2026-04-20 fine-tuning:
+#   xnet (IW2OHX-14)  → route_advert=60  (prevents xnet aging out our route)
+#   pcf  (IW2OHX-12)  → route_advert=0   (PCFlexnet DMs on unsolicited records)
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60
+Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0
 
 PollInterval    240
 KeepaliveInterval  90

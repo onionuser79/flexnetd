@@ -131,11 +131,19 @@ int config_load(const char *path, FlexConfig *cfg)
             cfg->lt_reply_interval = atoi(val);
         else if (!strcasecmp(key, "Port")) {
             /* M6 multi-port syntax:
-             *   Port <name> <neighbor> <listen_call>
+             *   Port <name> <neighbor> <listen_call> [route_advert=<sec>]
              * e.g.
-             *   Port xnet  IW2OHX-14  IW2OHX-3
-             *   Port pcf   IW2OHX-12  IW2OHX-3
-             * Each entry adds a PortCfg.  Up to MAX_PORTS entries.
+             *   Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60
+             *   Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0
+             *
+             * The optional 4th token overrides the global
+             * RouteAdvertInterval for THIS port only.  Useful when
+             * peers have different tolerances for unsolicited compact
+             * records (e.g., PCFlexnet DMs — must stay at 0; xnet
+             * tolerates — can be 60).
+             *
+             * Token format: "route_advert=<integer_seconds>" or bare
+             * integer.  Use -1 to mean "follow global default".
              */
             if (cfg->num_ports >= MAX_PORTS) {
                 LOG_WRN("config[%d]: Port table full (MAX_PORTS=%d), "
@@ -145,8 +153,11 @@ int config_load(const char *path, FlexConfig *cfg)
             char pname[MAX_IFACE_LEN] = {0};
             char nbr[MAX_CALLSIGN_LEN] = {0};
             char lcall[MAX_CALLSIGN_LEN] = {0};
-            if (sscanf(val, "%7s %9s %9s", pname, nbr, lcall) < 3) {
-                LOG_WRN("config[%d]: Port needs 3 fields "
+            char extra[64] = {0};
+            int fields = sscanf(val, "%7s %9s %9s %63s",
+                                pname, nbr, lcall, extra);
+            if (fields < 3) {
+                LOG_WRN("config[%d]: Port needs at least 3 fields "
                         "(<name> <neighbor> <listen_call>): '%s'",
                         lineno, val);
                 continue;
@@ -157,10 +168,19 @@ int config_load(const char *path, FlexConfig *cfg)
             snprintf(pc->listen_call, sizeof(pc->listen_call), "%s", lcall);
             callsign_upper(pc->neighbor);
             callsign_upper(pc->listen_call);
-            /* inherit SSID range from node defaults; per-port override
-             * syntax can be added later if needed */
+            /* inherit SSID range from node defaults */
             pc->min_ssid = cfg->min_ssid;
             pc->max_ssid = cfg->max_ssid;
+            /* per-port route_advert override — default -1 means "use
+             * the global RouteAdvertInterval setting" */
+            pc->route_advert_interval = -1;
+            if (fields >= 4 && extra[0]) {
+                const char *v = extra;
+                if (!strncasecmp(v, "route_advert=", 13)) v += 13;
+                pc->route_advert_interval = atoi(v);
+                LOG_INF("config[%d]: port '%s' route_advert override = %d s",
+                        lineno, pname, pc->route_advert_interval);
+            }
         }
         else
             LOG_WRN("config[%d]: unknown keyword '%s'", lineno, key);
@@ -183,6 +203,7 @@ int config_load(const char *path, FlexConfig *cfg)
         snprintf(pc->listen_call, sizeof(pc->listen_call), "%s", cfg->flex_listen_call);
         pc->min_ssid = cfg->min_ssid;
         pc->max_ssid = cfg->max_ssid;
+        pc->route_advert_interval = -1;   /* inherit global */
         cfg->num_ports = 1;
         LOG_DBG("config: synthesised ports[0] from legacy flat keywords");
     } else {
@@ -209,9 +230,15 @@ void config_dump(const FlexConfig *cfg)
     LOG_INF("  Ports             : %d configured", cfg->num_ports);
     for (int i = 0; i < cfg->num_ports; i++) {
         const PortCfg *pc = &cfg->ports[i];
-        LOG_INF("    [%d] %-8s  neighbor=%-9s  listen=%-9s  ssid=%d-%d",
+        int eff = (pc->route_advert_interval >= 0)
+                  ? pc->route_advert_interval
+                  : cfg->route_advert_interval;
+        LOG_INF("    [%d] %-8s  neighbor=%-9s  listen=%-9s  ssid=%d-%d  "
+                "route_advert=%ds%s",
                 i, pc->name, pc->neighbor, pc->listen_call,
-                pc->min_ssid, pc->max_ssid);
+                pc->min_ssid, pc->max_ssid,
+                eff,
+                pc->route_advert_interval >= 0 ? " (port override)" : " (global)");
     }
     LOG_INF("  PollInterval      : %d s", cfg->poll_interval);
     LOG_INF("  KeepaliveInterval : %d s", cfg->keepalive_interval);

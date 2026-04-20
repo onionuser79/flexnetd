@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.7.0"
+#define FLEXNETD_VERSION        "0.7.1-dev"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -40,7 +40,21 @@
 #define DEFAULT_POLL_INTERVAL   240
 #define DEFAULT_KEEPALIVE_S     90
 #define DEFAULT_BEACON_S        120
-#define DEFAULT_ROUTE_ADVERT_S  60   /* M6.7: periodic re-advertisement of our routes */
+/*
+ * DEFAULT_ROUTE_ADVERT_S — global default for M6.7 periodic re-advertisement
+ * (only used when a Port block doesn't override it).
+ *
+ * Set to 0 (disabled) as of v0.7.1 after observing that PCFlexnet
+ * (IW2OHX-12) sends L2 DM within 10-15 ms of receiving any unsolicited
+ * compact record.  The DM path in flxnod32.dll was RE'd from address
+ * 0x100063C5 onward: after processing a compact record, pcf checks its
+ * token state [ebx+0xF]; when state is 0 (idle), it calls l2_set_monitor
+ * then 0x10007330 which eventually tears down the L2 link.
+ *
+ * xnet (ARM ELF, different implementation) tolerates M6.7 — set
+ * RouteAdvertInterval=60 on the xnet port block to re-enable there.
+ */
+#define DEFAULT_ROUTE_ADVERT_S  0   /* 0 = disabled globally; opt-in per port */
 #define DEFAULT_LT_REPLY_S      90   /* M6.9: min seconds between link-time frames to a peer */
 #define DEFAULT_PROBE_COUNT     19
 #define DEFAULT_PROBE_INTERVAL_MS 7500
@@ -128,6 +142,7 @@ typedef struct {
     char    neighbor[MAX_CALLSIGN_LEN];        /* expected FlexNet peer on this port */
     int     min_ssid;                          /* SSID range announced to peer */
     int     max_ssid;
+    int     route_advert_interval;             /* per-port M6.7 override: -1=use global, 0=disabled, >0=seconds */
 } PortCfg;
 
 typedef struct {
