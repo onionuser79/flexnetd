@@ -451,16 +451,17 @@ static int run_native_ce_session(int fd)
                 if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
-                    /* v0.7.1.1: send link-time value 0 (not 2).  Traced from
-                     * xnet<->pcf capture (2026-04-20): xnet sends "1" "0" "\r"
-                     * (value=0) as its link-time frame; pcf's smoothed formula
-                     * (peer_val + avg + 1) / 2 converges toward 1 with
-                     * peer_val=0 but stays at ~2 with our previous peer_val=2.
-                     * This is the single byte that makes xnet's row in pcf's
-                     * l* show "1/1" while ours stayed elevated.  See full
-                     * analysis in v0.7.2 TODO notes.
+                    /* v0.7.1.2: reverted from 0 back to 2.  v0.7.1.1
+                     * changed value 2->0 based on the xnet<->pcf capture
+                     * showing xnet sends "10\r" (value=0).  Live test
+                     * showed this REGRESSED: pcf's Q/T went UP (to ~966)
+                     * and links dropped multiple times.  Hypothesis for
+                     * v0.7.2: xnet sends value=0 ONCE per session at
+                     * init (not every 320s).  At our 320s cadence, pcf
+                     * may take a "bad peer" branch on value=0 repeats.
+                     * Keep value=2 until we implement cadence mirroring.
                      */
-                    int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 0);
+                    int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
                     if (lt_len > 0) {
                         ax25_send(fd, PID_CE, lt_buf, lt_len);
                         g_link_stats.tx_bytes += lt_len;
@@ -681,10 +682,10 @@ static int run_native_ce_session(int fd)
                 if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
-                    /* v0.7.1.1: value 0 (was 2) — see poll_cycle.c:454 comment
-                     * and v0.7.2 TODO notes for full rationale. */
+                    /* v0.7.1.2: reverted 0 -> 2 (see poll_cycle.c:454
+                     * comment for rationale). */
                     int lt_len = ce_build_link_time(lt_buf,
-                                    (int)sizeof(lt_buf), 0);
+                                    (int)sizeof(lt_buf), 2);
                     if (lt_len > 0) {
                         ax25_send(fd, PID_CE, lt_buf, lt_len);
                         g_link_stats.tx_bytes += lt_len;

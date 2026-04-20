@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.1.1 (stable)
+**Current version:** v0.7.1.2 (stable; v0.7.1.1 reverted)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -299,31 +299,36 @@ current behaviour is ~75% state-5 samples (clean 1s and 100s) and
 aspects (route exchange, stability, outbound routing) work correctly.
 An adaptive-interval scheduler is planned for v0.7.2.
 
-### v0.7.1.1 — link-time value fix (2026-04-20, stable)
+### v0.7.1.1 — link-time value 2→0 experiment (REVERTED in v0.7.1.2)
 
-Patch release based on a xnet ↔ pcf L2 capture (30 min of monitor
-traffic on pcf's radio port).
+Patch attempt based on the xnet ↔ pcf L2 capture (30 min monitor
+traffic on pcf's radio port).  The capture showed xnet sending its
+link-time with value "0" (`31 30 0D`) whereas we were sending "2"
+(`31 32 0D`).  Rationale: per caller 1 at VA 0x100062CE in
+flxnod32.dll the smoothed formula is `(peer_val + avg + 1) / 2`, so
+`peer_val=0` should converge to 1 and `peer_val=2` should stall at 2.
 
-**Finding:** xnet sends its link-time frame with value **"0"** (bytes
-`31 30 0D` = "1" "0" "\r") whereas we were sending value **"2"**
-(bytes `31 32 0D` = "1" "2" "\r").  pcf's smoothed-RTT formula
-(per caller 1 at VA 0x100062CE in flxnod32.dll):
+**Deployed 2026-04-20, immediately observed regression:**
 
-    smoothed_new = (peer_val + avg + 1) / 2
+- pcf's displayed Q/T went UP (to ~966), not down
+- pcf's history buffer refilled with 4095, 600, 200, 100 samples
+- Xnet's view confirmed the byte change hit the wire (`rtt 600/0`)
+- **Links went down multiple times** — actual instability, not just
+  cosmetic drift
 
-With `peer_val=0` this converges to `(avg+1)/2` → tends toward 1.
-With `peer_val=2` this stays near `(avg+3)/2` → tends toward 2+.
-This single-byte difference explains why xnet's row in pcf's `l *`
-converges to `1/1` while ours stayed elevated around `1062`.
+Hypothesis for why value=0 failed at our cadence: the xnet capture
+showed xnet sending value=0 **ONCE per session** (at t=5.32s after
+init), then silent.  We sent value=0 every 320s via the proactive
+timer.  Pcf's state machine may take a "bad peer" branch when
+peer_val=0 arrives repeatedly, triggering L2 DM.
 
-**Change:** two call sites in poll_cycle.c updated:
-- line 454 (proactive timer branch)
-- line 676 (reply-to-peer-keepalive branch)
+Reverted in v0.7.1.2.
 
-Both now call `ce_build_link_time(..., 0)` instead of `..., 2`.
+### v0.7.1.2 — revert v0.7.1.1 (2026-04-20, stable)
 
-No config changes.  No wire-format changes (same 3-byte frame format,
-different digit character).  Minimal risk; back-compatible with xnet.
+Reverts the two poll_cycle.c call sites back to
+`ce_build_link_time(..., 2)`.  Restores v0.7.1 behaviour.  Full
+analysis preserved in the v0.7.1.1 section above and v0.7.2 TODO.
 
 ### v0.7.2 — M6 final fine-tuning (PLANNED)
 
@@ -331,22 +336,31 @@ Follow-on work identified during the v0.7.1 production deployment
 and the xnet ↔ pcf capture analysis.  All items are ranked by
 expected impact on pcf's displayed Q/T convergence.
 
-**Priority A — link-time cadence mirroring xnet**
+**Priority A — link-time cadence mirroring xnet (REVISED after v0.7.1.1 regression)**
 
 Xnet sends only TWO link-time frames in a 30-minute window:
   - At session init with value "600" (infinity sentinel)
-  - Once shortly after, with value "0"
+  - Once shortly after pcf's first keepalive, with value "0"
 
 Then xnet goes silent on link-time for the rest of the session.
 Our current code sends every `LinkTimeReplyInterval` (default 320s).
-pcf's state machine updates its smoothed on every link-time receipt,
-and each such update can kick it between states 2/3/5 with
-different ts_ahead (180s vs 320s), causing the 4095/100/1 mix we
-observe.
 
-Proposed fix: send link-time only at session init (+ optionally one
-follow-up after first pcf keepalive) then stop.  Remove the 320s
-proactive timer entirely or make it opt-in via config.
+v0.7.1.1 tested the hypothesis "value=0 is the key".  That REGRESSED:
+sending value=0 at our 320s cadence caused pcf's Q/T to jump up AND
+triggered multiple link drops.  Value=0 sent once is harmless (as
+xnet proves), but repeated at 320s intervals appears to hit a
+"bad-peer" branch in pcf's state machine.
+
+Revised hypothesis: the CADENCE is the real issue, more than the
+value.  Plan for v0.7.2:
+
+1. Send link-time ONCE at session init (with value "600" to match
+   xnet's init sentinel, or "2" to match current working default).
+2. Optionally send ONE follow-up after receiving the first pcf
+   keepalive (with value "0" — matches xnet's t=5.32 behaviour).
+3. Stop there.  Never send proactive link-time on a timer.
+4. Gate behind a new config `LinkTimeMode = xnet | periodic | none`
+   so current production behaviour stays default until tested.
 
 **Priority B — re-enable proactive `'3+'` tokens (with REJ tolerance)**
 
@@ -454,7 +468,8 @@ confirmed wire protocol.
 | v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
 | v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop + RE of flxnod32.dll | **Stable** |
 | v0.7.1 | M6 fine-tuning — per-port route_advert, M6.5 destinations merge, non-drift timing | **Stable** |
-| v0.7.1.1 | Link-time value 2→0 (pcf smoothed convergence fix) | **Stable** |
+| v0.7.1.1 | Link-time value 2→0 experiment | **Reverted** (caused link instability) |
+| v0.7.1.2 | v0.7.1.1 reverted back to value=2 | **Stable** |
 | v0.7.2 | Link-time cadence, proactive '3+' with REJ tolerance, routing batches | Planned |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
