@@ -445,12 +445,30 @@ static int run_native_ce_session(int fd)
              * Only starts after the initial advertisement (sent_routes=1)
              * so we don't race the handshake.  Interval=0 disables
              * re-advertisement (once-only, legacy behaviour). */
-            if (sent_routes && g_cfg.route_advert_interval > 0 &&
-                (now - last_routes_tx >= g_cfg.route_advert_interval))
+            /* v0.7.1 Priority 2: per-port route_advert_interval override.
+             * Evidence from 2026-04-20 capture: even M6.9.4 "record-only"
+             * re-advertisement triggers PCFlexnet to DM the L2 link
+             * within 10-15 ms.  The RE at VA 0x100063C5 onward shows
+             * that after processing ANY compact record, pcf checks its
+             * token state — if 0 (idle), it calls l2_set_monitor(0xF)
+             * then 0x10007330 which tears down the link.
+             *
+             * xnet doesn't have this behavior, so the per-port knob lets
+             * us enable M6.7 for xnet (where it prevents xnet aging out
+             * our route) and disable it for pcf (where it kills links). */
+            int port_advert = -1;
+            if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports)
+                port_advert = g_cfg.ports[g_port_idx].route_advert_interval;
+            int effective_advert = (port_advert >= 0)
+                                   ? port_advert
+                                   : g_cfg.route_advert_interval;
+
+            if (sent_routes && effective_advert > 0 &&
+                (now - last_routes_tx >= effective_advert))
             {
                 LOG_DBG("run_native_ce_session: periodic route re-advert "
-                        "(%lds since last)",
-                        (long)(now - last_routes_tx));
+                        "(%lds since last, interval=%ds)",
+                        (long)(now - last_routes_tx), effective_advert);
                 /* M6.9.4: record-only refresh.  No '3+' (peer state may
                  * not be 0 → would trigger DM).  No '3-' either (no
                  * state transition to signal).  The bare compact record
