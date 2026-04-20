@@ -36,17 +36,6 @@ int output_write_gateways(void)
 
     LOG_INF("output_write_gateways: writing to %s", g_cfg.gateways_file);
 
-    /* Resolve axports name → kernel interface.
-     * URONode uses the dev field to open an AX.25 socket — it must be
-     * the kernel interface name, not the axports port name.  The old
-     * flexd used ax25_config_get_dev() which does the same thing. */
-    char dev[16] = {0};
-    if (ax25_get_ifname(g_cfg.port_name, dev, sizeof(dev)) < 0) {
-        LOG_WRN("output_write_gateways: cannot resolve '%s' to interface, "
-                "falling back to port name", g_cfg.port_name);
-        snprintf(dev, sizeof(dev), "%s", g_cfg.port_name);
-    }
-
     FILE *f = fopen(tmp, "w");
     if (!f) {
         LOG_ERR("output_write_gateways: cannot open '%s': %s",
@@ -56,16 +45,45 @@ int output_write_gateways(void)
 
     /* flexd gateways format: addr callsign dev [digipeaters...]
      * URONode's read_flex_gt() (procinfo.c:113) uses strtok to parse:
-     *   field 1: addr (int)
+     *   field 1: addr (int)           — unique per gateway
      *   field 2: call (gateway callsign, max 9 chars)
-     *   field 3: dev  (interface name, max 4 chars)
+     *   field 3: dev  (kernel interface name, max 4 chars — NOT axports name)
      *   field 4+: digipeaters (each max 9 chars)
      *
-     * Include our callsign as digipeater so outbound FlexNet connects
-     * show our node in the via-list (digipeater path preservation). */
+     * v0.7.1 multi-port: iterate all configured ports and emit one
+     * gateway line per port.  Previously this function only wrote
+     * ports[0]'s neighbor, so URONode had no idea IW2OHX-12 was
+     * reachable as a gateway — outbound connections to destinations
+     * with "Via IW2OHX-12" would silently fail or fall back.
+     *
+     * Include our per-port listen_call as digipeater so outbound
+     * FlexNet connects show our node in the AX.25 via-list
+     * (digipeater path preservation).
+     */
     fprintf(f, "addr  callsign  dev  digipeaters\n");
-    fprintf(f, "%05d %s %s %s\n",
-            0, g_cfg.neighbor, dev, g_cfg.flex_listen_call);
+
+    int written = 0;
+    for (int i = 0; i < g_cfg.num_ports; i++) {
+        const PortCfg *pc = &g_cfg.ports[i];
+
+        /* Resolve axports name → kernel interface.  URONode uses the
+         * dev field to open an AX.25 socket, so it must be the kernel
+         * interface name (e.g. ax1), not the axports port name. */
+        char dev[16] = {0};
+        if (ax25_get_ifname(pc->name, dev, sizeof(dev)) < 0) {
+            LOG_WRN("output_write_gateways: port '%s' does not resolve to "
+                    "a kernel interface (port may not be up yet); "
+                    "falling back to port name", pc->name);
+            snprintf(dev, sizeof(dev), "%s", pc->name);
+        }
+
+        fprintf(f, "%05d %s %s %s\n",
+                i, pc->neighbor, dev, pc->listen_call);
+
+        LOG_INF("output_write_gateways: [%d] gateway=%s dev=%s digi=%s",
+                i, pc->neighbor, dev, pc->listen_call);
+        written++;
+    }
 
     fclose(f);
 
@@ -75,8 +93,8 @@ int output_write_gateways(void)
         return -1;
     }
 
-    LOG_INF("output_write_gateways: written (gateway=%s port=%s digi=%s)",
-            g_cfg.neighbor, g_cfg.port_name, g_cfg.flex_listen_call);
+    LOG_INF("output_write_gateways: wrote %d gateway row%s",
+            written, written == 1 ? "" : "s");
     return 0;
 }
 
