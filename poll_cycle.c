@@ -473,14 +473,36 @@ static int run_native_ce_session(int fd)
              * on the peer's side expires (4095 sample), and the session
              * gets torn down and reconnected.
              *
-             * Send a keepalive every 20 s since the last one we sent.
-             * (X)Net (which DOES send keepalives of its own — every
-             * 180 s per spec) still works because our extra ones are
-             * harmless — it just responds.
+             * v0.7.9: interval bumped from 20 s to 300 s.  Rationale:
+             *
+             *   xnet V1.39's smoothed-RTT IIR (smoothed = (15·smoothed +
+             *   delta + 8) / 16) uses inter-frame delta of our outbound
+             *   CE frames as its sample stream.  The prior 20 s interval
+             *   fired 9× between xnet's native 189 s KAs, dominating
+             *   xnet's IIR and converging its displayed RTT to ~200 ticks
+             *   (20 s) instead of the ~2 ticks (200 ms) seen with
+             *   linbpq-flexnet (IW2OHX-13).
+             *
+             *   Evidence (2026-04-21 capture, flexnet_v0.7.3_xnet_port6):
+             *     proactive fires at :48, :08, :29, :50 (Δ ≈ 20-22 s)
+             *     xnet native KAs arrive at +189 s intervals
+             *     xnet wire value climbs 10 → 124 → 171 (stabilises)
+             *
+             *   linbpq-flexnet (reference — FlexNetCode.c:362): sends ONE
+             *   keepalive at session start, thereafter pure echo on peer
+             *   events.  That's why it shows Q=2 RTT=2 stable with xnet.
+             *
+             * 300 s is longer than xnet's 189 s native cadence, so xnet's
+             * KAs always reset `last_keepalive_tx` first and the proactive
+             * never fires on an active xnet link.  On pcf (which does
+             * reply but never originates), 300 s is a safe session-keeper
+             * and lt_reply=320 still gates LT emission below ts_ahead.
              *
              * We also send a link-time probe after the keepalive so the
-             * peer's RTT cycle has something to measure against. */
-            if (now - last_keepalive_tx >= 20) {
+             * peer's RTT cycle has something to measure against — but on
+             * xnet with lt_reply=0 this now only fires if the peer has
+             * genuinely been silent for 5 minutes. */
+            if (now - last_keepalive_tx >= 300) {
                 LOG_DBG("run_native_ce_session: proactive keepalive "
                         "(quiet %lds)", (long)(now - last_keepalive_tx));
                 send_ce_keepalive(fd);
