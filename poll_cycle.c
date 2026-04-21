@@ -1113,13 +1113,28 @@ static int run_native_ce_session(int fd)
                     }
                 }
 
-                /* Write destinations periodically (every 60s) so
-                 * uronode sees fresh data while the session is alive.
-                 * Without this, the file is only written on disconnect. */
-                time_t now = time(NULL);
-                if (merged_total > 0 && now - last_dest_write >= 60) {
+                /* Write destinations after every compact-record batch.
+                 *
+                 * HISTORY (v0.3.0 - v0.7.3): this write was rate-limited
+                 * to once per 60 s.  That was benign while the xnet peer
+                 * advertised routes in a slow trickle, but became
+                 * load-bearing in exactly the wrong way once the session
+                 * setup was fixed enough for xnet to dump its entire
+                 * 100-120-entry dtable in a 20-30 s initial burst:
+                 * only the first ~20 records reached disk, the next
+                 * 5 batches were merged into g_table in memory but
+                 * never flushed.  Since xnet then goes silent (normal
+                 * behaviour — routes are advertised once at session
+                 * setup), the gate never reopened.  Users saw only 20
+                 * entries in `fld` for the entire session lifetime.
+                 *
+                 * Fix (v0.7.4): write on every batch.  Cost is ~20 KB
+                 * of I/O per compact frame — negligible — and after the
+                 * initial burst xnet stops sending compact records, so
+                 * the writes naturally stop too. */
+                if (n > 0) {
                     output_write_destinations();
-                    last_dest_write = now;
+                    last_dest_write = time(NULL);
                     LOG_INF("run_native_ce_session: destinations "
                             "written (%d reachable)",
                             dtable_count_reachable());

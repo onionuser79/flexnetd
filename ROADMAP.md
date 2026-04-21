@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.3 (stable)
+**Current version:** v0.7.4 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -392,6 +392,21 @@ v0.7.3 below):
 Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
 and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
 
+### v0.7.4 — destinations-file truncation fix (2026-04-21, stable)
+
+Latent bug since v0.3.0.  `run_native_ce_session()` rate-limited the
+`output_write_destinations()` call to once every 60 s, so when xnet
+dumps its full ~120-entry dtable in a single 20–30 s burst at
+session setup, only the first batch of 20 records reached disk.
+The rest were merged into `g_table` in memory but the 60 s gate
+blocked the flush, and since xnet goes silent after the initial
+burst (routes are re-advertised only on change), the gate never
+reopened.  Users saw 20 entries in `fld` for the entire session
+lifetime.
+
+Fix: remove the 60 s gate, flush after every compact-record batch.
+One-line change, no config knobs.
+
 ### v0.7.3 — Per-port link-time cadence (2026-04-21, stable)
 
 Fixes xnet's smoothed-RTT convergence.  Root cause analysis from the
@@ -511,6 +526,7 @@ confirmed wire protocol.
 | v0.7.1.2 | v0.7.1.1 reverted back to value=2 | **Stable** |
 | v0.7.2 | Protocol alignment: keepalive format, type-4 seq, link-time unification | **Stable** |
 | v0.7.3 | Per-port `lt_reply_interval` + inline reply restored (fixes xnet smoothed RTT) | **Stable** |
+| v0.7.4 | Destinations-file truncation fix (drop 60 s flush rate limit, write every batch) | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
