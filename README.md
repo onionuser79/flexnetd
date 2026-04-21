@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.3-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.3)
+[![stable](https://img.shields.io/badge/release-v0.7.4-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.4)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,71 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.4 (2026-04-21)
+
+**Critical fix — destinations file truncated to first 20 entries.**
+
+A latent bug present since v0.3.0 was silently dropping 80–95% of the
+routes xnet advertises to us.  The fix is a one-line change in
+`poll_cycle.c`.
+
+**Symptom**
+
+After session establishment, `fld` and the `destinations` file consistently
+showed only the first 20 routes (alphabetically, ending at `IQ5KG-7`).
+Logs showed the full route set *was* being received and parsed — the
+following appears in the debug log at session init:
+
+```
+compact frame — 20 entries parsed, 20 total merged
+destinations_merge: wrote unified file with 20 rows  ← write fired
+compact frame — 20 entries parsed, 40 total merged   ← no write
+compact frame — 20 entries parsed, 60 total merged   ← no write
+compact frame — 24 entries parsed, 84 total merged   ← no write
+compact frame — 24 entries parsed, 108 total merged  ← no write
+compact frame — 12 entries parsed, 120 total merged  ← no write
+```
+
+All 120 records arrived within ~22 seconds, all merged into the
+in-memory dtable, but only the first batch made it to the on-disk
+`destinations` file.
+
+**Root cause**
+
+`run_native_ce_session()` rate-limited the call to
+`output_write_destinations()` to once every 60 seconds:
+
+```c
+if (merged_total > 0 && now - last_dest_write >= 60) {
+    output_write_destinations();
+    last_dest_write = now;
+}
+```
+
+That was benign while xnet advertised routes in a slow trickle, but
+since xnet actually dumps its entire FlexNet dtable in a 20–30 s
+burst at session setup and then goes silent (routes are re-advertised
+only when they change), the gate blocked batches 2–6 and never
+reopened.  Users saw 20 entries for the whole session lifetime, even
+though the in-memory state had all 120.
+
+**Fix**
+
+Remove the rate limit; write the destinations file after every
+compact-record batch.  The cost is negligible (~20 KB of disk I/O per
+batch, at most 6–8 batches per session setup) and after the initial
+burst xnet stops sending compact records, so the writes naturally
+stop too.
+
+The `last_dest_write` local variable is still tracked for diagnostics
+but no longer gates the write.
+
+**Expected effect**
+
+`fld` and the `destinations` file should now contain the full ~120-entry
+FlexNet destination table within ~30 seconds of session establishment,
+matching what the in-memory dtable shows.
 
 ### v0.7.3 (2026-04-21)
 
