@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.7.7"
+#define FLEXNETD_VERSION        "0.7.8"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -141,6 +141,18 @@ void flexnetd_log(int level, const char *tag, const char *fmt, ...)
  * typically the same across ports (e.g. IW2OHX-3 everywhere) — this is
  * supported by the kernel when each socket uses SO_BINDTODEVICE.
  */
+/* Route-advert mode: how we wrap our own route advertisement.
+ *   RECORD  = just the compact record (no token).  Safe for PCFlexnet
+ *             which DMs the L2 link on unsolicited '3+' when its
+ *             internal token state is non-zero.
+ *   FULL    = '3+' + record + '3-'.  Required by xnet for the
+ *             token-exchange / sync cycle to complete.  Without the
+ *             trailing '3-' closure xnet keeps re-advertising its
+ *             dtable every ~21 s and its smoothed RTT to us never
+ *             converges to the linbpq-equivalent value. */
+#define ADVERT_MODE_RECORD   0
+#define ADVERT_MODE_FULL     1
+
 typedef struct {
     char    name[MAX_IFACE_LEN];               /* axports port name (e.g. "xnet") */
     char    listen_call[MAX_CALLSIGN_LEN];     /* callsign bound on this port */
@@ -149,6 +161,7 @@ typedef struct {
     int     max_ssid;
     int     route_advert_interval;             /* per-port M6.7 override: -1=use global, 0=disabled, >0=seconds */
     int     lt_reply_interval;                 /* per-port M6.9 override: -1=use global, 0=every tick, >0=seconds between link-time sends */
+    int     advert_mode;                       /* v0.7.8: ADVERT_MODE_RECORD or ADVERT_MODE_FULL (-1 = use default FULL) */
 } PortCfg;
 
 typedef struct {

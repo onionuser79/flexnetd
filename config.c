@@ -176,6 +176,7 @@ int config_load(const char *path, FlexConfig *cfg)
             pc->max_ssid = cfg->max_ssid;
             pc->route_advert_interval = -1;   /* inherit global */
             pc->lt_reply_interval     = -1;   /* inherit global */
+            pc->advert_mode           = -1;   /* -1 = default (FULL) */
 
             /* Walk any remaining tokens (opt=val or bare first-position
              * integer for back-compat). */
@@ -205,6 +206,19 @@ int config_load(const char *path, FlexConfig *cfg)
                     pc->lt_reply_interval = atoi(optbuf + 9);
                     LOG_INF("config[%d]: port '%s' lt_reply = %d s",
                             lineno, pname, pc->lt_reply_interval);
+                } else if (!strncasecmp(optbuf, "advert_mode=", 12)) {
+                    const char *v = optbuf + 12;
+                    if (!strcasecmp(v, "full"))
+                        pc->advert_mode = ADVERT_MODE_FULL;
+                    else if (!strcasecmp(v, "record"))
+                        pc->advert_mode = ADVERT_MODE_RECORD;
+                    else
+                        pc->advert_mode = atoi(v);
+                    LOG_INF("config[%d]: port '%s' advert_mode = %s",
+                            lineno, pname,
+                            pc->advert_mode == ADVERT_MODE_FULL   ? "full"   :
+                            pc->advert_mode == ADVERT_MODE_RECORD ? "record" :
+                            "default");
                 } else if (opt_pos == 1 &&
                            (optbuf[0] == '-' || (optbuf[0] >= '0' && optbuf[0] <= '9'))) {
                     /* back-compat: bare integer as 4th field = route_advert */
@@ -241,6 +255,7 @@ int config_load(const char *path, FlexConfig *cfg)
         pc->max_ssid = cfg->max_ssid;
         pc->route_advert_interval = -1;   /* inherit global */
         pc->lt_reply_interval     = -1;   /* inherit global */
+        pc->advert_mode           = -1;   /* default FULL */
         cfg->num_ports = 1;
         LOG_DBG("config: synthesised ports[0] from legacy flat keywords");
     } else {
@@ -273,14 +288,19 @@ void config_dump(const FlexConfig *cfg)
         int eff_lt = (pc->lt_reply_interval >= 0)
                      ? pc->lt_reply_interval
                      : cfg->lt_reply_interval;
+        int eff_am = (pc->advert_mode >= 0)
+                     ? pc->advert_mode
+                     : ADVERT_MODE_FULL;   /* default: xnet-friendly */
         LOG_INF("    [%d] %-8s  neighbor=%-9s  listen=%-9s  ssid=%d-%d  "
-                "route_advert=%ds%s  lt_reply=%ds%s",
+                "route_advert=%ds%s  lt_reply=%ds%s  advert_mode=%s%s",
                 i, pc->name, pc->neighbor, pc->listen_call,
                 pc->min_ssid, pc->max_ssid,
                 eff_ra,
                 pc->route_advert_interval >= 0 ? " (port)" : " (global)",
                 eff_lt,
-                pc->lt_reply_interval     >= 0 ? " (port)" : " (global)");
+                pc->lt_reply_interval     >= 0 ? " (port)" : " (global)",
+                eff_am == ADVERT_MODE_FULL ? "full" : "record",
+                pc->advert_mode >= 0 ? " (port)" : " (default)");
     }
     LOG_INF("  PollInterval      : %d s", cfg->poll_interval);
     LOG_INF("  KeepaliveInterval : %d s", cfg->keepalive_interval);

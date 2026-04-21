@@ -766,15 +766,30 @@ static int run_native_ce_session(int fd)
             /* After first keepalive exchange with peer, the link is
              * stable — proactively advertise our routes.  The peer
              * does not send '3+' (request token) unprompted, so we
-             * initiate the route advertisement ourselves. */
+             * initiate the route advertisement ourselves.
+             *
+             * v0.7.8: use per-port advert_mode to decide whether to
+             * wrap in '3+' ... '3-' (token exchange) or emit record-
+             * only.  Default is FULL (xnet-friendly, required for
+             * xnet's token-exchange cycle to complete and for its
+             * smoothed-RTT loop to converge).  PCFlexnet ports should
+             * explicitly set advert_mode=record to avoid the pcf DM
+             * path on unsolicited '3+' (M6.9.4). */
             if (!sent_routes && got_peer_init && got_setup) {
+                int port_advert_mode = ADVERT_MODE_FULL;   /* default */
+                if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports &&
+                    g_cfg.ports[g_port_idx].advert_mode >= 0) {
+                    port_advert_mode = g_cfg.ports[g_port_idx].advert_mode;
+                }
+                int send_mode = (port_advert_mode == ADVERT_MODE_FULL)
+                                ? SEND_ROUTES_FULL_INITIATE
+                                : SEND_ROUTES_RECORD_ONLY;
                 LOG_INF("run_native_ce_session: link stable — "
-                        "sending our routes (record-only, safe path)");
-                /* M6.9.4: record-only.  If peer will later send '3+',
-                 * our reactive handler will reply with record+'3-' to
-                 * close the peer-initiated exchange properly.  If peer
-                 * never sends '3+', our record is already in its table. */
-                send_own_routes(fd, SEND_ROUTES_RECORD_ONLY);
+                        "sending our routes (%s)",
+                        send_mode == SEND_ROUTES_FULL_INITIATE
+                            ? "full '3+'/record/'3-' exchange"
+                            : "record only, pcf-safe");
+                send_own_routes(fd, send_mode);
                 sent_routes    = 1;
                 last_routes_tx = time(NULL);   /* M6.7: seed re-advert timer */
             }

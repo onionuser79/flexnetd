@@ -35,10 +35,16 @@ Role            server
 #                       lt_reply=0       (reply on every peer frame; xnet
 #                                         converges to Q=2 RTT=2 only with
 #                                         this; lt_reply=20 sticks at ~240)
+#                       advert_mode=full (send '3+'/record/'3-' token cycle;
+#                                         required for xnet's sync to
+#                                         complete, which lets its smoothed
+#                                         RTT loop settle)
 #   pcf  (IW2OHX-12)  → route_advert=0   (PCFlexnet DMs on unsolicited records)
 #                       lt_reply=320     (matches pcf's ts_ahead window)
-Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=0
-Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320
+#                       advert_mode=record (never send '3+' — pcf DMs on
+#                                         unsolicited token requests)
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=0    advert_mode=full
+Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320  advert_mode=record
 
 PollInterval    240
 KeepaliveInterval  90
