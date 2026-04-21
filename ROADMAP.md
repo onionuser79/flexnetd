@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.6 (stable)
+**Current version:** v0.7.7 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -392,6 +392,24 @@ v0.7.3 below):
 Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
 and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
 
+### v0.7.7 — Disable proactive type-4 TX (2026-04-21, stable)
+
+Production xnet identifies as `(X)NET/DLC7 V1.39` and does NOT have
+a type-4 dispatcher.  My v0.7.2 RE was on a newer V2.1 `linuxnet`
+binary which added a type-4 handler (slot 4 of the jump table at
+rodata 0x0808fca4).  V2.1 was an upstream test release; the deployed
+V1.39 doesn't recognise type-4 and labels our frame as "unknown
+packet type" in its monitor.  ~20 s later it withdraws every route
+it had advertised to us.
+
+linbpq-flexnet (working peer on IW2OHX-13, stable 8+ days) never
+emits type-4.  Our v0.7.2 proactive TX was the wrong addition for
+this peer population.
+
+Fix: disable the `ce_build_token` call in the per-iteration section
+of `run_native_ce_session()`.  RX parse path retained for forward
+compatibility with future V2.1+ peers.  No config change.
+
 ### v0.7.6 — Config recommendation: `lt_reply=0` for xnet (2026-04-21, stable)
 
 Docs-only.  v0.7.3 recommended `lt_reply=20` on xnet ports but live
@@ -565,6 +583,7 @@ confirmed wire protocol.
 | v0.7.4 | Destinations-file truncation fix (drop 60 s flush rate limit, write every batch) | **Stable** |
 | v0.7.5 | dtable_merge skips RTT=0 incoming (xnet refresh marker preserves real RTTs) | **Stable** |
 | v0.7.6 | Config: `lt_reply=0` on xnet (docs only — fixes Q/T convergence) | **Stable** |
+| v0.7.7 | Disable proactive type-4 TX (V1.39 drops routes on "unknown packet type") | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 

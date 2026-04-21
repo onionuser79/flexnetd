@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.6-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.6)
+[![stable](https://img.shields.io/badge/release-v0.7.7-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.7)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,69 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.7 (2026-04-21)
+
+**Critical fix: disable proactive type-4 TX — production xnet withdraws routes on receiving it.**
+
+**Symptom**
+
+After every session with xnet (IW2OHX-14), the remote destinations
+file grows to ~60–65 entries, then stays at that count.  A few
+seconds later xnet's `L` row for IW2OHX-3 shows Q climbing and RTT
+climbing.  Routes that xnet initially advertised are marked "link
+down" in the next routing frame and never come back.
+
+**Root cause — from live monitor capture**
+
+Using `sudo listen -a -p xnet` on the IW2OHX host, the timeline at
+session setup shows:
+
+```
+15:47:21.115  IW2OHX-14 -> IW2OHX-3 len=244 FlexNet: Routing
+              22 records, real RTTs: SV1DZI 12-12 delay:56, VA3BAL 1-1 delay:62, ...
+15:47:21.118  IW2OHX-14 -> IW2OHX-3 len=238 FlexNet: Routing    (21 more records)
+15:47:21.119  IW2OHX-14 -> IW2OHX-3 len=244 FlexNet: Routing    (22 more records)
+              — xnet advertised 65 routes, real RTTs —
+
+15:47:21.123  IW2OHX-3 -> IW2OHX-14  ctl I15 len=3
+              FlexNet: unknown packet type
+              0000  42.              ← OUR type-4 frame: '4' '2' '\r'
+
+              — 21-second silence —
+
+15:47:42.125  IW2OHX-14 -> IW2OHX-3 len=242 FlexNet: Routing
+              24 records all "link down"
+15:47:42.129  IW2OHX-14 -> IW2OHX-3 len=242 FlexNet: Routing
+              24 records all "link down"
+15:47:42.132  IW2OHX-14 -> IW2OHX-3 len=172 FlexNet: Routing
+              17 records all "link down"
+              — xnet withdrew all 65 routes —
+```
+
+The production xnet node identifies itself as **`(X)NET/DLC7 V1.39`**.
+That version does NOT have a type-4 dispatcher handler — my v0.7.2 RE
+was done on a newer `linuxnet` V2.1 binary where slot 4 of the CE
+jump table (at rodata 0x0808fca4) is bound to a routing-seq gossip
+handler.  V1.39's parser falls through to the "unknown packet type"
+path, and 20 seconds later xnet aggressively withdraws routes.
+
+linbpq-flexnet (running on IW2OHX-13, keeping 60+ routes stable for
+8+ days) **never** emits type-4.  Our flexnetd added proactive
+type-4 TX in v0.7.2 based on the V2.1 RE.  That addition was
+premature on the V1.39 production peer.
+
+**Fix**
+
+Disable the proactive type-4 TX block in `run_native_ce_session()`.
+The RX parsing path stays — harmless, forward-compatible with V2.1+
+peers that might send type-4.  No configuration change.
+
+**Expected effect**
+
+- Destinations file grows to the full ~65 entries and stays there.
+- Xnet does NOT withdraw routes 20 s after advertising them.
+- Xnet's `L` row for IW2OHX-3 stabilises instead of climbing.
 
 ### v0.7.6 (2026-04-21)
 
