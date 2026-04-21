@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.1.2-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.1.2)
+[![stable](https://img.shields.io/badge/release-v0.7.2-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.2)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,66 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.2 (2026-04-21)
+
+Protocol-level fixes from a full reverse-engineering of xnet's
+`linuxnet` binary — see `RE_NOTES_XNET.md` for the detailed
+findings.  All changes make the wire format match xnet exactly.
+
+**Keepalive format — FIXED**
+
+Xnet keepalive is `'2'` + 240 × `' '` (241 bytes, all spaces after
+the leading '2'), NOT the `'2'` + 237 × `' '` + `'10\r'` that the
+pre-RE spec described.  The earlier spec had mis-read a live
+monitor capture in which two back-to-back frames (a keepalive
+followed immediately by a type-1 link-time) were concatenated in
+the hex dump — the offset reset to `0000` at the frame boundary
+was easy to miss.  Xnet's builder at VA `0x0804f360` is literally
+`sprintf(buf, "2%240s", "")`.
+
+PCFlexnet uses a shorter variant (`'2'` + 200 × `' '` = 201 bytes),
+also all spaces with no trailer.  RX now accepts any length whose
+body is pure whitespace after the leading `'2'`.
+
+`ce_build_keepalive()` updated.  The `CE_KEEPALIVE_LEN = 241` constant
+continues to describe our TX size (xnet-compatible).
+
+**Type-1 link-time — CLARIFIED**
+
+`'10\r'` / `'11\r'` / `'12\r'` are ordinary type-1 link-time frames
+with decimal values 0/1/2 — not a distinct frame kind.  Xnet rodata
+`0x0808fc9d` carries the format string `"1%ld\r"` which generates
+any of these.  The obsolete `CE_FRAME_STATUS_10` classification has
+been removed from the RX path; `ce_parse_frame()` now accepts any
+`'1'` + decimal frame ≥ 3 bytes as `CE_FRAME_LINK_TIME`.
+
+**Type-4 routing-seq gossip — CORRECT FORMAT + WIRED IN**
+
+Xnet wire format is `'4%u\r'` (rodata `0x0808fcca`, builder at VA
+`0x08050760`) — no flag byte.  RX handler (VA `0x08050515`) just
+stores the received value and does NOT reply.
+
+Previous versions emitted `'4%d%c\r'` and echoed received type-4
+frames back to the peer.  The echo caused unnecessary RF and
+triggered PCFlexnet's "your routes changed" branch.  v0.7.2
+removes both quirks and wires type-4 TX to the correct trigger:
+emit whenever our reachable destination count changes between
+iterations (approximating xnet's per-mutation seq increment).
+
+**Keepalive period**
+
+`DEFAULT_KEEPALIVE_S` bumped from 90 to 180 s to match xnet's exact
+180 000-ms gate at VA `0x080507f7`.  This is the config default
+only — the proactive-20 s send in the CE session handler (to keep
+silent pcf peers alive) is unaffected.
+
+**Still open / not yet done**
+
+These four items from the previous v0.7.2 plan remain for v0.7.3+:
+link-time cadence mirroring xnet (init-only vs 320 s), proactive
+'3+' with REJ tolerance, routing batches (240-byte multi-record
+frames), state-6 investigation.  See ROADMAP.md.
 
 ### v0.7.1.2 (2026-04-20)
 

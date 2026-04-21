@@ -57,28 +57,31 @@ int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid)
     return CE_LINK_SETUP_LEN;
 }
 
-/* ── CE keepalive: '2' + 237 spaces + '1' '0' '\r' = 241 bytes ─────── */
+/* ── CE keepalive: '2' + 240 spaces = 241 bytes (xnet-verified) ─────── */
 /*
- * Wire format (from PROTOCOL_SPEC.md §CE type-2 — confirmed):
- *   0x32 + 237x 0x20 + 0x31 0x30 0x0D
+ * Wire format (confirmed by RE of xnet's linuxnet binary, April 2026):
+ *   0x32 + 240x 0x20
  *
- * The trailing 0x31 0x30 0x0D = "10\r" is an EMBEDDED link-time frame
- * inside the keepalive (CE type-1 format: '1' <digit> '\r').  Strict
- * peers — notably PCFlexnet — rely on this embedded link-time to
- * update their smoothed RTT estimate of us.  Without it, PCFlexnet's
- * RTT estimate never converges and saturates to 4095 (12-bit max),
- * which is what the "tx 4095/2" value in its `l *` table reports.
+ * The xnet keepalive builder (VA 0x0804f360) calls:
+ *     sprintf(buf, "2%240s", "");
+ * which produces '2' followed by 240 spaces, total 241 bytes, with NO
+ * trailing '10\r' / '11\r' / '12\r'.  See RE_NOTES_XNET.md § "Type 2 —
+ * Keepalive" for the smoking-gun capture evidence.
  *
- * xnet is more tolerant because it has other RTT sources (its own
- * keepalive every ~189s and NET/ROM L3RTT probes), so a malformed
- * tail on our keepalives still converges its RTT via those paths.
+ * PCFlexnet uses a shorter keepalive (201 bytes = '2' + 200 spaces) but
+ * still all-spaces.  Both flavours are accepted by both implementations.
  *
- * M6.8: fixed the tail — was 240 spaces (no link-time) before.
+ * HISTORY: Earlier versions of flexnetd (M6.8 through v0.7.1.2) emitted
+ * '2' + 237 spaces + '10\r' per the old PROTOCOL_SPEC.md.  That spec
+ * entry mis-read a monitor capture that had concatenated a keepalive
+ * and a following type-1 frame into a single hex-dump entry (the offset
+ * field reset to 0000 at the frame boundary — invisible unless you
+ * look at the raw line).  The '10\r' bytes are actually a separate
+ * type-1 link-time frame sent right after the keepalive, not part of
+ * it.  Fixing this matches xnet's behaviour exactly.
  *
- * Spec also mentions '11\r' and '12\r' as valid tails — the last
- * digit is the sender's current link-time value in 100ms ticks.
- * We use '0' for now (link time = 0); making it dynamic would be a
- * follow-up once we're sure about the units.
+ * xnet keepalive period is exactly 180 s (180000 ms = 0x2BF20 ticks),
+ * gated by the per-port tick at VA 0x080507b0.  See DEFAULT_KEEPALIVE_S.
  */
 int ce_build_keepalive(uint8_t *buf, int buflen)
 {
@@ -87,12 +90,9 @@ int ce_build_keepalive(uint8_t *buf, int buflen)
                 buflen, CE_KEEPALIVE_LEN);
         return -1;
     }
-    buf[0]   = '2';                   /* keepalive marker */
-    memset(buf + 1, ' ', 237);        /* 237 padding spaces */
-    buf[238] = '1';                   /* embedded link-time prefix */
-    buf[239] = '0';                   /* link-time value = 0 ticks */
-    buf[240] = '\r';                  /* terminator */
-    LOG_DBG("ce_build_keepalive: built %d bytes (tail='10\\r')",
+    buf[0] = '2';                           /* keepalive marker */
+    memset(buf + 1, ' ', CE_KEEPALIVE_LEN - 1);  /* 240 spaces */
+    LOG_DBG("ce_build_keepalive: built %d bytes ('2' + 240 spaces)",
             CE_KEEPALIVE_LEN);
     return CE_KEEPALIVE_LEN;
 }
@@ -162,23 +162,37 @@ int ce_build_link_time(uint8_t *buf, int buflen, long link_time_ms)
     return len;
 }
 
-/* ── CE token: '4' + decimal_value + flag_char + '\r' ──────────────── */
+/* ── CE type-4 — routing-table sequence gossip ────────────────────── */
 /*
- * Wire format: '4' + decimal_value + flag_char + '\r'
- *   token_val = sequence number
- *   flag      = token handover flag character
- *               (space = normal, 'R' = request, etc.)
+ * Wire format (xnet rodata 0x0808fcca, builder at VA 0x08050760):
+ *   sprintf(buf, "4%u\r", seq);
+ *
+ * Purpose: cheap "routing table has changed" notification.  xnet
+ * maintains a single 16-bit global sequence number that increments
+ * whenever the routing table mutates.  On every per-port tick it
+ * compares the global seq against the last value advertised to that
+ * peer and, if different, emits a type-4 frame.  The peer just records
+ * the received seq (no reply).  When a peer sees a seq higher than
+ * what it last requested routes for, it knows to send '3+' to pull.
+ *
+ * flexnetd v0.7.2: we implement TX from poll_cycle when our route set
+ * changed between cycles, and RX just logs the peer seq.  We don't yet
+ * use the received seq to drive '3+' — that's a future refinement.
+ *
+ * The 'flag' argument of the legacy signature is retained for
+ * source-compat but IGNORED on the wire (xnet format has no flag).
  */
 int ce_build_token(uint8_t *buf, int buflen, int token_val, char flag)
 {
+    (void)flag;   /* xnet format has no flag byte */
     char tmp[32];
-    int len = snprintf(tmp, sizeof(tmp), "4%d%c\r", token_val, flag);
+    int len = snprintf(tmp, sizeof(tmp), "4%u\r", (unsigned)token_val);
     if (len < 0 || len >= (int)sizeof(tmp) || len >= buflen) {
         LOG_ERR("ce_build_token: overflow");
         return -1;
     }
     memcpy(buf, tmp, (size_t)len);
-    LOG_DBG("ce_build_token: val=%d flag='%c'", token_val, flag);
+    LOG_DBG("ce_build_token: seq=%u", (unsigned)token_val);
     return len;
 }
 
@@ -311,15 +325,17 @@ int ce_parse_dest_broadcast(const uint8_t *data, int len,
  * ce_parse_frame — classify and parse a CE frame.
  *
  * Returns (see CE_FRAME_* constants in flexnetd.h):
- *   CE_FRAME_KEEPALIVE(1)   keepalive
- *   CE_FRAME_STATUS_POS(2)  status '+' (positive)
- *   CE_FRAME_STATUS_NEG(3)  status '-' (negative / withdrawal)
- *   CE_FRAME_STATUS_10(4)   status '10\r'
- *   CE_FRAME_COMPACT(5)     compact record ('3' prefix)
- *   CE_FRAME_LINK_TIME(6)   link time ('1' prefix)
- *   CE_FRAME_TOKEN(7)       token/sequence ('4' prefix)
- *   CE_FRAME_DEST_BCAST(8)  destination broadcast ('6' prefix)
- *   CE_FRAME_INIT(9)        initial handshake ('0' prefix)
+ *   CE_FRAME_KEEPALIVE(1)    keepalive ('2' + N spaces)
+ *   CE_FRAME_STATUS_POS(2)   status '3+\r' (request routes)
+ *   CE_FRAME_STATUS_NEG(3)   status '3-\r' (end of batch)
+ *   CE_FRAME_STATUS_10(4)    OBSOLETE — '10\r' now classified as link-time
+ *   CE_FRAME_COMPACT(5)      compact record ('3' prefix with records)
+ *   CE_FRAME_LINK_TIME(6)    link time ('1' prefix, any decimal value)
+ *   CE_FRAME_TOKEN(7)        routing-seq gossip ('4' prefix) — xnet type-4
+ *   CE_FRAME_DEST_BCAST(8)   legacy '6' dest broadcast (no longer emitted)
+ *   CE_FRAME_INIT(9)         initial handshake ('0' prefix)
+ *   CE_FRAME_PATH_REQUEST    type-6 Route/Traceroute request
+ *   CE_FRAME_PATH_REPLY      type-7 accumulated hop list
  *  -1  unrecognised
  */
 int ce_parse_frame(const uint8_t *data, int len,
@@ -327,13 +343,27 @@ int ce_parse_frame(const uint8_t *data, int len,
 {
     if (len <= 0) return -1;
 
-    /* keepalive: 241 bytes starting with '2' */
-    if (len == CE_KEEPALIVE_LEN && data[0] == '2') {
-        LOG_DBG("ce_parse_frame: keepalive (%d bytes)", len);
-        return CE_FRAME_KEEPALIVE;
+    /* keepalive: starts with '2', all remaining bytes are spaces.
+     * xnet uses 241 bytes ('2' + 240 spaces); pcf uses 201 bytes
+     * ('2' + 200 spaces).  Accept any length ≥ 2 whose body after the
+     * '2' is pure whitespace — that cleanly handles both peers and
+     * also guards against partial / fragmented deliveries. */
+    if (data[0] == '2' && len >= 2) {
+        int all_spaces = 1;
+        for (int i = 1; i < len; i++) {
+            if (data[i] != ' ') { all_spaces = 0; break; }
+        }
+        if (all_spaces) {
+            LOG_DBG("ce_parse_frame: keepalive (%d bytes, all spaces)", len);
+            return CE_FRAME_KEEPALIVE;
+        }
     }
 
-    /* tiny status frames (exactly 3 bytes) */
+    /* tiny status frames (exactly 3 bytes) — routing tokens only.
+     * Historical '10\r' classification removed in v0.7.2: xnet RE
+     * showed '10\r'/'11\r'/'12\r' are ordinary type-1 link-time
+     * frames with value 0/1/2 respectively, not a distinct frame
+     * kind.  They fall through to the CE_FRAME_LINK_TIME path below. */
     if (len == 3) {
         if (data[0]=='3' && data[1]=='+' && data[2]=='\r') {
             LOG_DBG("ce_parse_frame: status '3+'");
@@ -342,10 +372,6 @@ int ce_parse_frame(const uint8_t *data, int len,
         if (data[0]=='3' && data[1]=='-' && data[2]=='\r') {
             LOG_DBG("ce_parse_frame: status '3-'");
             return CE_FRAME_STATUS_NEG;
-        }
-        if (data[0]=='1' && data[1]=='0' && data[2]=='\r') {
-            LOG_DBG("ce_parse_frame: status '10'");
-            return CE_FRAME_STATUS_10;
         }
     }
 
@@ -361,10 +387,13 @@ int ce_parse_frame(const uint8_t *data, int len,
         return CE_FRAME_INIT;
     }
 
-    /* ── Link time: '1' + decimal_ms + '\r' ────────────────────────── */
-    /* Format: '1%d\r' — link time in milliseconds.
-     * Must distinguish from '10\r' (already caught above as 3-byte). */
-    if (data[0] == '1' && len > 3) {
+    /* ── Link time: '1' + decimal + '\r' ──────────────────────────── */
+    /* Format: '1%ld\r' (xnet rodata 0x0808fc9d).  Wire value is in
+     * SECONDS (internal 10-ms ticks divided by 100 before send, per
+     * xnet VA 0x080503f8).  Short frames like "10\r", "11\r", "12\r"
+     * and long ones like "1600\r" are all the same kind — just
+     * different decimal values. */
+    if (data[0] == '1' && len >= 3) {
         char tbuf[16] = {0};
         int ti = 0;
         for (int i = 1; i < len && i < 15; i++) {
@@ -376,13 +405,14 @@ int ce_parse_frame(const uint8_t *data, int len,
         if (ti > 0) {
             int link_time = atoi(tbuf);
             if (rtt_out) *rtt_out = link_time;
-            LOG_INF("ce_parse_frame: link time = %d ms", link_time);
+            LOG_INF("ce_parse_frame: link time = %d s (wire)", link_time);
             return CE_FRAME_LINK_TIME;
         }
     }
 
-    /* ── Token: '4' + decimal + flag_char + '\r' ───────────────────── */
-    /* Format: '4%d%c\r' */
+    /* ── Type-4 routing-seq gossip: '4' + decimal + '\r' ──────────── */
+    /* xnet RX handler (VA 0x08050515) just strtol's the value and
+     * stores it at word[port_state+0x20] — no flag, no reply. */
     if (data[0] == '4' && len >= 3) {
         char vbuf[16] = {0};
         int vi = 0;
@@ -391,14 +421,10 @@ int ce_parse_frame(const uint8_t *data, int len,
             vbuf[vi++] = (char)data[i++];
         if (vi > 0) {
             int token_val = atoi(vbuf);
-            char flag = (i < len && data[i] != '\r') ? (char)data[i] : ' ';
             if (rtt_out) *rtt_out = token_val;
-            if (callsign_out) {
-                callsign_out[0] = flag;
-                callsign_out[1] = '\0';
-            }
-            LOG_INF("ce_parse_frame: token val=%d flag='%c'",
-                    token_val, flag);
+            if (callsign_out) callsign_out[0] = '\0';
+            LOG_INF("ce_parse_frame: type-4 routing-seq=%u",
+                    (unsigned)token_val);
             return CE_FRAME_TOKEN;
         }
     }

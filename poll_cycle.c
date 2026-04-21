@@ -329,7 +329,10 @@ static int run_native_ce_session(int fd)
     int     keepalive_count = 0;
     int     frame_count  = 0;
     long    link_time_ms = 0;       /* from CE type-1 link time frames */
-    int     last_token   = 0;       /* from CE type-4 token frames */
+    int     last_token   = 0;       /* from CE type-4 seq frames (our value last advertised to peer) */
+    int     last_seen_dest_count = -1;  /* v0.7.2: last g_table.count we advertised to peer via type-4 */
+    unsigned route_seq  = 1;            /* v0.7.2: our routing-table seq; increments every dtable change we notice */
+    time_t  last_seq_tx = 0;            /* v0.7.2: last type-4 TX time (rate-limit during bursty route ingestion) */
     int     got_peer_init = 0;      /* received peer's init handshake   */
     int     sent_routes   = 0;      /* advertised our routes to peer    */
     time_t  last_dest_write = 0;    /* last time we wrote destinations  */
@@ -412,6 +415,46 @@ static int run_native_ce_session(int fd)
                 last_stats_write = now;
             }
 
+            /* v0.7.2: CE type-4 routing-seq gossip.
+             *
+             * xnet per-port tick (RE'd at VA 0x080507b0) emits a type-4
+             * frame whenever our own global routing-seq differs from the
+             * value last advertised to this peer.  Purpose: cheap
+             * "routes changed, pull if you care" hint.
+             *
+             * We approximate the global seq by watching g_table.count —
+             * if it changes between iterations we bump our seq.  This
+             * isn't as fine-grained as xnet (which increments on any
+             * mutation including RTT updates) but is enough to tell the
+             * peer a change occurred without waiting for a '3+' cycle.
+             *
+             * TX format (xnet rodata 0x0808fcca): '4%u\r'. */
+            {
+                int cur_dest_count = dtable_count_reachable();
+                if (cur_dest_count != last_seen_dest_count) {
+                    /* Track that a change happened and increment seq,
+                     * but only TX if at least 5 s have passed since the
+                     * last type-4 frame — avoids bursts during initial
+                     * route ingestion where dest count climbs rapidly. */
+                    if (last_seen_dest_count >= 0) route_seq++;
+                    last_seen_dest_count = cur_dest_count;
+                    if (got_peer_init && (now - last_seq_tx) >= 5) {
+                        uint8_t sbuf[16];
+                        int slen = ce_build_token(sbuf, sizeof(sbuf),
+                                                  (int)route_seq, ' ');
+                        if (slen > 0) {
+                            ax25_send(fd, PID_CE, sbuf, slen);
+                            g_link_stats.tx_bytes += slen;
+                            g_link_stats.tx_frames++;
+                            last_seq_tx = now;
+                            LOG_INF("run_native_ce_session: type-4 seq=%u "
+                                    "(dst_count=%d)",
+                                    route_seq, cur_dest_count);
+                        }
+                    }
+                }
+            }
+
             /* Proactive CE keepalive timer.  Some peers (e.g. PCFlexnet
              * on the pcf port) do NOT send CE keepalives autonomously —
              * they expect us to initiate and respond to theirs.  If the
@@ -420,8 +463,9 @@ static int run_native_ce_session(int fd)
              * gets torn down and reconnected.
              *
              * Send a keepalive every 20 s since the last one we sent.
-             * xnet (which DOES send keepalives of its own) still works
-             * because our extra ones are harmless — it just responds.
+             * xnet (which DOES send keepalives of its own — every 180 s
+             * per RE of VA 0x080507f7) still works because our extra
+             * ones are harmless — it just responds.
              *
              * We also send a link-time probe after the keepalive so the
              * peer's RTT cycle has something to measure against. */
@@ -663,8 +707,18 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Keepalive: 241 bytes starting with '2' */
-        if (len == CE_KEEPALIVE_LEN && buf[0] == '2') {
+        /* Keepalive: '2' + N spaces.
+         * xnet uses N=240 (241 bytes total), PCFlexnet uses N=200 (201
+         * bytes total) — both all-spaces, no trailer (xnet RE v0.7.2).
+         * Accept any length ≥ 2 whose body after the '2' is pure space. */
+        int is_keepalive = 0;
+        if (len >= 2 && buf[0] == '2') {
+            is_keepalive = 1;
+            for (int kai = 1; kai < len; kai++) {
+                if (buf[kai] != ' ') { is_keepalive = 0; break; }
+            }
+        }
+        if (is_keepalive) {
             keepalive_count++;
             LOG_INF("run_native_ce_session: CE keepalive #%d", keepalive_count);
             send_ce_keepalive(fd);
@@ -749,8 +803,10 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Link time: '1' prefix — link time in 100ms ticks */
-        if (buf[0] == '1' && len > 3) {
+        /* Link time: '1' prefix + decimal + '\r'.
+         * Accept any length ≥ 3 — "10\r"/"11\r"/"12\r" are valid
+         * type-1 frames with decimal values 0/1/2 (xnet RE, v0.7.2). */
+        if (buf[0] == '1' && len >= 3) {
             int lt_val = 0;
             int r = ce_parse_frame(buf, len, NULL, NULL, &lt_val);
             if (r == CE_FRAME_LINK_TIME) {
@@ -808,21 +864,27 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Token: '4' prefix — token/sequence exchange */
+        /* Type-4 routing-seq gossip: '4' + decimal + '\r'.
+         *
+         * xnet RX handler (VA 0x08050515, RE'd April 2026) just
+         * strtol's the value and stores it at word[port_state+0x20].
+         * No reply, no echo.  Purpose is purely informational: when
+         * the peer sees a seq higher than what it last requested
+         * routes for, it knows to issue a '3+' to pull fresh records.
+         *
+         * Previous flexnetd versions echoed the frame back — that
+         * caused unnecessary RF churn and, worse, PCFlexnet
+         * interpreted the echo as "your routes changed" and re-ran
+         * its own '3+' gate.  v0.7.2: drop the echo. */
         if (buf[0] == '4') {
-            char flag_buf[MAX_CALLSIGN_LEN] = {0};
             int token_val = 0;
-            int r = ce_parse_frame(buf, len, flag_buf, NULL, &token_val);
+            /* ce_parse_frame writes the (now unused) flag char into
+             * callsign_out[0]; pass NULL since we don't need it. */
+            int r = ce_parse_frame(buf, len, NULL, NULL, &token_val);
             if (r == CE_FRAME_TOKEN) {
                 last_token = token_val;
-                LOG_INF("run_native_ce_session: token val=%d flag='%c'",
-                        token_val, flag_buf[0]);
-                /* Echo token back (the peer may expect acknowledgement) */
-                uint8_t tbuf[32];
-                int tlen = ce_build_token(tbuf, sizeof(tbuf),
-                                          token_val, flag_buf[0]);
-                if (tlen > 0)
-                    ax25_send(fd, PID_CE, tbuf, tlen);
+                LOG_INF("run_native_ce_session: peer routing-seq=%u "
+                        "(stored, no reply)", (unsigned)token_val);
             }
             t_start = time(NULL);
             continue;
@@ -957,11 +1019,11 @@ static int run_native_ce_session(int fd)
                 continue;
             }
 
-            if (r == CE_FRAME_STATUS_10) {
-                LOG_DBG("run_native_ce_session: status '10'");
-                t_start = time(NULL);
-                continue;
-            }
+            /* Note: CE_FRAME_STATUS_10 was removed in v0.7.2 after the
+             * xnet RE confirmed '10\r' is an ordinary CE_FRAME_LINK_TIME
+             * with decimal value 0 (a legitimate link-time reply, not a
+             * distinct "status 10" frame).  It now falls through into
+             * the LINK_TIME path above. */
 
             if (r == CE_FRAME_COMPACT) {
                 /* Multi-entry compact records: CALL(6)+SSID_LO+SSID_HI+RTT.

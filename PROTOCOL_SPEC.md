@@ -3,7 +3,17 @@
 # Initial: 2026-04-10 | Phase 1/2: 2026-04-13 | Phase 3: 2026-04-13 | Phase 4: 2026-04-13 | M2: 2026-04-14
 # Author: IW2OHX + Claude Sonnet 4.6 + Claude Opus 4.6
 # Verified against: DCC1995 paper (DK7WJ/N2IRZ), xnet138.pdf, RMNC_FlexNet.html
+# xnet linuxnet binary RE: 2026-04-21 (RE_NOTES_XNET.md)
 # Status: ALL INVESTIGATION ITEMS RESOLVED
+# =======================================================================
+#
+# IMPORTANT — v0.7.2 corrections (xnet binary RE, April 2026)
+# -----------------------------------------------------------
+# The xnet linuxnet binary was reverse-engineered end-to-end on
+# 2026-04-21 (see RE_NOTES_XNET.md for full details).  Several
+# entries in this file were subsequently corrected where they
+# conflicted with the actual on-wire behaviour of xnet.  Look for
+# [v0.7.2 RE] markers throughout this file for the updated text.
 # =======================================================================
 
 ## CRITICAL: PID assignments (confirmed from xnet138.pdf section 4.3.12)
@@ -176,12 +186,30 @@
   Used by neighbor for Q/T link quality metric.
 
 
-### CE type-2 — Keepalive / null frame (confirmed)
+### CE type-2 — Keepalive / null frame [v0.7.2 RE — CORRECTED]
 
-  241 bytes: 0x32 + 237x 0x20 + 0x31 0x30 0x0D. Period ~189s.
-  Send as single AX.25 I-frame: b'\x32' + b'\x20'*237 + b'\x31\x30\x0d'
-  TCP SPLIT: telnet monitor delivers in two chunks. '10\r'/'11\r'/'12\r'
-  tail fragments are NOT separate messages -- keepalive tails only.
+  xnet wire format (confirmed by RE of linuxnet at VA 0x0804f360):
+    241 bytes = 0x32 + 240 × 0x20
+    Built as:  sprintf(buf, "2%240s", "");
+
+  PCFlexnet variant:
+    201 bytes = 0x32 + 200 × 0x20
+
+  Both are pure `'2'` + N spaces with NO trailing bytes.  RX should
+  accept any length ≥ 2 whose body after the `'2'` is all whitespace.
+
+  Period: xnet emits a keepalive when (now - last_ka_tx) > 180000 ms
+  (0x2BF20, VA 0x080507f7).  Previous spec said "~189 s" — that was
+  sampling error; exact value is 180 s.
+
+  HISTORICAL NOTE: the pre-RE spec said the trailer was 0x31 0x30 0x0D
+  ("10\r") and called this "confirmed".  That was a misread of a
+  monitor capture where a keepalive and the type-1 link-time frame
+  that immediately followed it were concatenated into a single
+  hex-dump entry — the offset field resets to 0000 at the frame
+  boundary, easy to miss.  The '10\r' / '11\r' / '12\r' bytes are
+  ALWAYS a separate type-1 link-time frame (see CE type-1 below),
+  never part of a keepalive.
 
 
 ### CE type-3 — Routing data / token exchange
@@ -203,7 +231,16 @@
     '1' (0x31)| RTT-Pong / link time in milliseconds
     '2' (0x32)| RTT-Ping / keepalive null frame (241 bytes)
     '3' (0x33)| Routing tokens ('3+', '3-') and compact routing records
-    '4' (0x34)| Destination filter (Send only / Resend all with RTT threshold)
+    '4' (0x34)| Routing-table sequence gossip  [v0.7.2 RE — CORRECTED]
+              Wire: '4%u\r'  (xnet rodata 0x0808fcca, builder 0x08050760)
+              Xnet increments a global 16-bit routing-seq on every dtable
+              mutation; per-port tick sends '4<seq>\r' whenever our seq
+              differs from the value last sent to that peer.  RX just
+              stores the seq (xnet VA 0x08050515) — no reply, no echo.
+              Purpose: tell the peer "routes changed, pull if you care"
+              without the overhead of a full '3+' cycle.
+              Previous spec entry ("Destination filter") was an initial
+              guess; the actual semantic is routing-seq gossip.
     '5' (0x35)| unused / default fallthrough
     '6' (0x36)| Route REQUEST or Traceroute REQUEST  (see below)
     '7' (0x37)| Route REPLY or Traceroute REPLY      (see below)
@@ -287,7 +324,8 @@
   Full D-table exchange both directions (PID=CF)
   CE token exchange: 3+\r + compact records + 3-\r per direction
   [AX.25 DISC/UA]
-  Between cycles: CE keepalive every ~189s
+  Between cycles: CE keepalive every 180s [v0.7.2 RE — exact value
+                  0x2BF20 = 180000 ms, VA 0x080507f7; spec prev said ~189s]
 
 ---
 
@@ -304,7 +342,9 @@
   RTT unit              : 100ms
   RTT infinity          : 60000
   Polling interval      : ~240s
-  CE keepalive          : 241 bytes = 0x32 + 237x 0x20 + 0x31 0x30 0x0D
+  CE keepalive (xnet)   : 241 bytes = 0x32 + 240x 0x20  [v0.7.2 RE — CORRECTED]
+  CE keepalive (pcf)    : 201 bytes = 0x32 + 200x 0x20  [v0.7.2 RE]
+  CE keepalive period   : 180s (exact, VA 0x080507f7)   [v0.7.2 RE — was ~189s]
   CE init frame         : 5 bytes = 0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D
   CE link-time initial  : '1600\r' (600 ticks)
   CE SSID encoding      : ord(c) - 0x30 for c in '0'..'?' (0x30..0x3F)
@@ -321,8 +361,17 @@
 
   #1  val1=0 when $M=60000, non-zero when active. CONFIRMED.
   #2  val2=0 when $M=60000, non-zero when active. val1=0 AND val2=0 = link-down. CONFIRMED.
-  #3  Mystery '10\r': TCP split of keepalive tail. Not a protocol message. RESOLVED.
-  #4  CE null frame: 0x32 + 237x 0x20 + '10\r'. CONFIRMED.
+  #3  Mystery '10\r': [v0.7.2 RE — RE-OPENED AND RESOLVED]
+      Originally believed to be a TCP-split keepalive tail.  The xnet
+      linuxnet RE (April 2026) proved '10\r' / '11\r' / '12\r' are
+      ordinary CE type-1 link-time frames with decimal values 0/1/2
+      (rodata 0x0808fc9d = "1%ld\r").  The frames are short and often
+      arrive immediately after a keepalive, which earlier monitor
+      captures concatenated in the hex dump — the 0000 offset reset
+      at the frame boundary was the clue that was missed.  RESOLVED.
+  #4  CE null frame: 0x32 + 240x 0x20 (xnet)  OR  0x32 + 200x 0x20 (pcf).
+      Both variants are pure '2' + N spaces with NO trailer.
+      [v0.7.2 RE — CORRECTED from "0x32 + 237x 0x20 + '10\r'"]
   #5  CE trigger: cycle-boundary token exchange. D_TABLE poison-reverse IS immediate. CONFIRMED.
   #6  CE SSID >=10: char substitution 0x30+N. 86 real-data examples confirmed. RESOLVED.
   #8  D command: CE type-6/7 request-reply for multi-hop paths. Format REVISED 2026-04-19:
@@ -343,7 +392,9 @@
   2.  On connect: CE type-0 init (0x30, 0x30+max_ssid, 0x25, 0x21, 0x0D)
   3.  Every ~240s: ~19 L3RTT pairs (PID=CF) then full D-table exchange
   4.  After first keepalive: CE type-1 link time ('1600\r', converges down)
-  5.  Every ~90s: CE keepalive — 241 bytes as single AX.25 I-frame
+  5.  Every 180s (xnet) or on-demand: CE keepalive — 241 bytes (xnet)
+      or 201 bytes (pcf) as single AX.25 I-frame.  Content is
+      '2' + N spaces, no trailer.  [v0.7.2 RE]
   6.  CE route exchange: '3+\r' + compact records + '3-\r' per cycle
   7.  On link drop: immediately advertise RTT=60000 for all affected dests
   8.  L3RTT: val1=val2=0 when no reply, non-zero when active

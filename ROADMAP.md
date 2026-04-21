@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.1.2 (stable; v0.7.1.1 reverted)
+**Current version:** v0.7.2 (stable; post xnet RE)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -330,72 +330,80 @@ Reverts the two poll_cycle.c call sites back to
 `ce_build_link_time(..., 2)`.  Restores v0.7.1 behaviour.  Full
 analysis preserved in the v0.7.1.1 section above and v0.7.2 TODO.
 
-### v0.7.2 — M6 final fine-tuning (PLANNED)
+### v0.7.2 — Protocol fixes from xnet linuxnet RE (2026-04-21)
 
-Follow-on work identified during the v0.7.1 production deployment
-and the xnet ↔ pcf capture analysis.  All items are ranked by
-expected impact on pcf's displayed Q/T convergence.
+Full reverse-engineering of the xnet `linuxnet` binary (ELF 32-bit
+i386, stripped, `(X)NET by DL1GJI, LEVEL3_V2.1, Sep 20 2005`)
+uncovered several on-wire details the pre-RE PROTOCOL_SPEC.md had
+wrong.  All findings documented in `RE_NOTES_XNET.md`.  v0.7.2
+applies the corrections:
 
-**Priority A — link-time cadence mirroring xnet (REVISED after v0.7.1.1 regression)**
+**CE type-2 keepalive — FIXED**
 
-Xnet sends only TWO link-time frames in a 30-minute window:
-  - At session init with value "600" (infinity sentinel)
-  - Once shortly after pcf's first keepalive, with value "0"
+*Before:* 241 bytes = `'2'` + 237 × `' '` + `'10\r'` (per the old
+spec, which mis-read a monitor capture where two back-to-back frames
+were concatenated in the hex dump).
 
-Then xnet goes silent on link-time for the rest of the session.
-Our current code sends every `LinkTimeReplyInterval` (default 320s).
+*After:* 241 bytes = `'2'` + 240 × `' '` (xnet `sprintf(buf, "2%240s", "")`
+at VA `0x0804f360`).  PCFlexnet's 201-byte variant
+(`'2'` + 200 × `' '`) is also accepted on RX.
 
-v0.7.1.1 tested the hypothesis "value=0 is the key".  That REGRESSED:
-sending value=0 at our 320s cadence caused pcf's Q/T to jump up AND
-triggered multiple link drops.  Value=0 sent once is harmless (as
-xnet proves), but repeated at 320s intervals appears to hit a
-"bad-peer" branch in pcf's state machine.
+RX now classifies any `'2'` + all-space payload as keepalive
+regardless of length, so partial / fragmented deliveries and the
+pcf variant both work.
 
-Revised hypothesis: the CADENCE is the real issue, more than the
-value.  Plan for v0.7.2:
+**CE type-4 routing-seq — IMPLEMENTED CORRECTLY**
 
-1. Send link-time ONCE at session init (with value "600" to match
-   xnet's init sentinel, or "2" to match current working default).
-2. Optionally send ONE follow-up after receiving the first pcf
-   keepalive (with value "0" — matches xnet's t=5.32 behaviour).
-3. Stop there.  Never send proactive link-time on a timer.
-4. Gate behind a new config `LinkTimeMode = xnet | periodic | none`
-   so current production behaviour stays default until tested.
+*Before:* `ce_build_token()` emitted `'4%d%c\r'` (decimal + flag char);
+`ce_parse_frame()` echoed received type-4 frames back to the peer.
 
-**Priority B — re-enable proactive `'3+'` tokens (with REJ tolerance)**
+*After:* Wire format is `'4%u\r'` (xnet rodata `0x0808fcca`, builder
+at VA `0x08050760`).  No flag byte.  RX handler stores the received
+value and does NOT reply (xnet VA `0x08050515` just `strtol`'s it).
 
-In the capture, both xnet AND pcf send `'3+'` proactively.  pcf
-occasionally REJects xnet's `'3+'` (at t=0.48s: `REJ2-`) but xnet
-simply ignores the REJ and continues normally — no DISC triggered.
+Added TX: emit a type-4 frame whenever the reachable destination
+count in our dtable changes between iterations — this is the xnet
+"routing table changed" gossip pattern.  Cheaper than '3+' churn.
 
-Our v0.7.1 approach of disabling proactive `'3+'` (`route_advert=0`
-on the pcf port) was over-defensive.  Restoring proactive `'3+'`
-with explicit REJ handling (don't DISC on REJ, just back off briefly
-and retry) should re-enable periodic route re-advertisement to pcf
-and keep our route fresh in pcf's tables.
+**CE type-1 link-time — CLARIFIED**
 
-**Priority C — send routing batches (multi-record 240-byte frames)**
+*Before:* `'10\r'` / `'11\r'` / `'12\r'` were classified as a
+distinct `CE_FRAME_STATUS_10` and treated as no-ops.
 
-Xnet sends `len=242` compact-record frames packed with ~15-20 routes
-per frame, multiple times per minute.  We currently send only
-single-record 12-byte frames on pcf's `'3+'` request.
+*After:* They are ordinary type-1 link-time frames with decimal
+values 0 / 1 / 2 respectively (xnet format string at rodata
+`0x0808fc9d` is literally `"1%ld\r"`).  RX handler accepts any
+`'1'` + decimal ≥ 3 bytes.  The `CE_FRAME_STATUS_10` constant is
+retained for source-compat but no frame is ever classified as it.
 
-Proposed: batch our d-table into 240-byte frames and send periodically
-(e.g. every 60s) matching xnet's cadence.
+**Keepalive period**
 
-**Priority D — state-6 investigation (stretch)**
+`DEFAULT_KEEPALIVE_S` bumped from 90 to 180 to match xnet's
+exact 180 000-ms gate at VA `0x080507f7`.  The proactive 20-s
+send in the CE session handler (used to keep silent pcf peers
+alive) is unaffected.
 
-The 4095 samples in pcf's history for us correspond to state-2/3
-windows where pcf's ts_ahead is 180s but we send at 320s intervals.
-If we can trigger pcf into state 6 (where ts_ahead=0s, per VA
-0x100067A6), our sends will always produce delta=0 → stored as 1.
-Needs more RE to understand state transition triggers.
+**Still open for v0.7.3+**
 
-**Input:** flexnet_capture_port1.json (30 min xnet↔pcf radio capture,
-2026-04-20, 61 xnet↔pcf frames across 300 total).
+The four priorities below remain open and are now the next work:
 
-**Output goal:** pcf's `l *` row for IW2OHX 3-3 converges to `1/1`
-matching how it displays xnet and all other local peers.
+1. **Link-time cadence / value selection** — Xnet sends "600"
+   once at init, then "0" after the first peer keepalive, then
+   goes silent.  We still send "2" every 320 s.  Mirroring xnet
+   exactly (init-only) is the most likely route to pcf `1/1`
+   convergence but needs a test deploy with rollback plan (v0.7.1.1
+   regression preserved as the cautionary tale).
+2. **Proactive `'3+'` tokens with REJ tolerance** — re-enable
+   periodic route re-advertisement to pcf with explicit
+   non-disconnect REJ handling.
+3. **Routing batches** — pack the dtable into 240-byte multi-record
+   type-3 frames matching xnet's cadence.
+4. **State-6 investigation** — understand what triggers pcf's
+   state-6 (ts_ahead = 0) so our repeated link-times stop
+   saturating to 4095.
+
+Tracking input: `flexnet_capture_port1.json` + `RE_NOTES_XNET.md`.
+Target: pcf's `l *` row for IW2OHX 3-3 converges to `1/1`.
 
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
 
@@ -470,7 +478,7 @@ confirmed wire protocol.
 | v0.7.1 | M6 fine-tuning — per-port route_advert, M6.5 destinations merge, non-drift timing | **Stable** |
 | v0.7.1.1 | Link-time value 2→0 experiment | **Reverted** (caused link instability) |
 | v0.7.1.2 | v0.7.1.1 reverted back to value=2 | **Stable** |
-| v0.7.2 | Link-time cadence, proactive '3+' with REJ tolerance, routing batches | Planned |
+| v0.7.2 | xnet linuxnet RE: keepalive format fix, type-4 seq correct, link-time '1x\r' unification | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
