@@ -330,9 +330,14 @@ static int run_native_ce_session(int fd)
     int     frame_count  = 0;
     long    link_time_ms = 0;       /* from CE type-1 link time frames */
     int     last_token   = 0;       /* from CE type-4 seq frames (our value last advertised to peer) */
-    int     last_seen_dest_count = -1;  /* v0.7.2: last g_table.count we advertised to peer via type-4 */
-    unsigned route_seq  = 1;            /* v0.7.2: our routing-table seq; increments every dtable change we notice */
-    time_t  last_seq_tx = 0;            /* v0.7.2: last type-4 TX time (rate-limit during bursty route ingestion) */
+    /* v0.7.2 added proactive type-4 TX tracking with these locals;
+     * v0.7.7 disabled the TX after production xnet V1.39 was found
+     * to label type-4 as "unknown packet type" and withdraw routes
+     * ~20 s later.  Locals retained (unused) for easy reactivation
+     * once a V2.1+ peer is available to test against. */
+    int      last_seen_dest_count = -1;
+    unsigned route_seq            = 1;
+    time_t   last_seq_tx          = 0;
     int     got_peer_init = 0;      /* received peer's init handshake   */
     int     sent_routes   = 0;      /* advertised our routes to peer    */
     time_t  last_dest_write = 0;    /* last time we wrote destinations  */
@@ -436,46 +441,30 @@ static int run_native_ce_session(int fd)
                 last_stats_write = now;
             }
 
-            /* v0.7.2: CE type-4 routing-seq gossip (see PROTOCOL_SPEC.md §2.7).
+            /* v0.7.7: CE type-4 routing-seq TX is DISABLED.
              *
-             * Per spec, a node emits a type-4 frame whenever its own
-             * global routing-seq differs from the value last advertised
-             * to this peer.  Purpose: cheap "routes changed, pull if
-             * you care" hint.
+             * v0.7.2 added a proactive type-4 TX when our dtable count
+             * changes, based on RE of the xnet `linuxnet` V2.1 binary
+             * which includes a type-4 dispatcher handler (slot 4 of the
+             * jump table at rodata 0x0808fca4).
              *
-             * We approximate the global seq by watching g_table.count —
-             * if it changes between iterations we bump our seq.  This
-             * is coarser than the reference (which increments on any
-             * mutation including RTT updates) but is enough to tell
-             * the peer a change occurred without waiting for a '3+'
-             * cycle.
+             * Production xnet is V1.39 (per "(X)NET/DLC7 V1.39" banner),
+             * which does NOT have a type-4 handler.  Live monitor
+             * captures our type-4 frame as "FlexNet: unknown packet
+             * type" — and ~20 seconds later xnet withdraws every route
+             * it just advertised to us.  The linbpq-flexnet reference
+             * (running on IW2OHX-13 and keeping 60+ routes stable for
+             * 8+ days with xnet) never emits type-4.
              *
-             * TX format: '4%u\r'. */
-            {
-                int cur_dest_count = dtable_count_reachable();
-                if (cur_dest_count != last_seen_dest_count) {
-                    /* Track that a change happened and increment seq,
-                     * but only TX if at least 5 s have passed since the
-                     * last type-4 frame — avoids bursts during initial
-                     * route ingestion where dest count climbs rapidly. */
-                    if (last_seen_dest_count >= 0) route_seq++;
-                    last_seen_dest_count = cur_dest_count;
-                    if (got_peer_init && (now - last_seq_tx) >= 5) {
-                        uint8_t sbuf[16];
-                        int slen = ce_build_token(sbuf, sizeof(sbuf),
-                                                  (int)route_seq, ' ');
-                        if (slen > 0) {
-                            ax25_send(fd, PID_CE, sbuf, slen);
-                            g_link_stats.tx_bytes += slen;
-                            g_link_stats.tx_frames++;
-                            last_seq_tx = now;
-                            LOG_INF("run_native_ce_session: type-4 seq=%u "
-                                    "(dst_count=%d)",
-                                    route_seq, cur_dest_count);
-                        }
-                    }
-                }
-            }
+             * Removing our proactive type-4 TX matches linbpq-flexnet's
+             * behaviour.  Routes advertised by xnet should now persist.
+             *
+             * We still PARSE received type-4 in ce_parse_frame() —
+             * harmless, and keeps us forward-compatible with V2.1
+             * peers that do emit it. */
+            (void)route_seq;              /* counter still tracked for logs / future use */
+            (void)last_seen_dest_count;
+            (void)last_seq_tx;
 
             /* Proactive CE keepalive timer.  Some peers (e.g. PCFlexnet
              * on the pcf port) do NOT send CE keepalives autonomously —
