@@ -381,6 +381,27 @@ static int run_native_ce_session(int fd)
     struct timespec lt_sent_ts = {0};  /* when we last sent a link-time frame */
     int     lt_sent_pending = 0;       /* 1 = waiting for peer's link-time reply */
 
+    /* v0.7.3: effective per-port lt_reply_interval.
+     *
+     * A port's PortCfg.lt_reply_interval overrides the global
+     * LinkTimeReplyInterval.  Use a small value (e.g. 20) on xnet ports
+     * so peer's smoothed RTT measurement converges, and keep the
+     * global default (320) on PCFlexnet ports where a short interval
+     * would saturate pcf's RTT field at 4095.  See PROTOCOL_SPEC.md §2.4
+     * and the linbpq-flexnet reference implementation which uses 0
+     * (reply on every keepalive) as the xnet-friendly pattern. */
+    int     effective_lt_reply;
+    if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports &&
+        g_cfg.ports[g_port_idx].lt_reply_interval >= 0) {
+        effective_lt_reply = g_cfg.ports[g_port_idx].lt_reply_interval;
+        LOG_INF("run_native_ce_session: port '%s' lt_reply=%d s (port override)",
+                g_cfg.ports[g_port_idx].name, effective_lt_reply);
+    } else {
+        effective_lt_reply = g_cfg.lt_reply_interval;
+        LOG_INF("run_native_ce_session: lt_reply=%d s (global)",
+                effective_lt_reply);
+    }
+
     /* Initialize link stats for this session.
      * M6.6: use THIS CE child's port-specific neighbor (from g_port_idx)
      * instead of the legacy g_cfg.neighbor (which mirrors ports[0]). */
@@ -492,19 +513,14 @@ static int run_native_ce_session(int fd)
                  * (X)Net doesn't hit this because it initiates its own
                  * link-time exchanges on its cycle.  PCFlexnet only
                  * replies — so WE must respect the interval. */
-                if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
+                if (effective_lt_reply <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
-                    /* v0.7.1.2: reverted from 0 back to 2.  v0.7.1.1
-                     * changed value 2->0 based on the xnet<->pcf capture
-                     * showing xnet sends "10\r" (value=0).  Live test
-                     * showed this REGRESSED: pcf's Q/T went UP (to ~966)
-                     * and links dropped multiple times.  Hypothesis for
-                     * v0.7.2: xnet sends value=0 ONCE per session at
-                     * init (not every 320s).  At our 320s cadence, pcf
-                     * may take a "bad peer" branch on value=0 repeats.
-                     * Keep value=2 until we implement cadence mirroring.
-                     */
+                    /* Link-time value carries our smoothed RTT.  We
+                     * hard-code 2 (= 200 ms wire) because our actual
+                     * smoothed measurement is not yet implemented; this
+                     * matches linbpq-flexnet's value and is accepted
+                     * by both (X)Net and PCFlexnet. */
                     int lt_len = ce_build_link_time(lt_buf, sizeof(lt_buf), 2);
                     if (lt_len > 0) {
                         ax25_send(fd, PID_CE, lt_buf, lt_len);
@@ -516,14 +532,14 @@ static int run_native_ce_session(int fd)
                         /* Advance schedule by one interval.  If we fell
                          * behind (now well past next_lt_tx), skip forward
                          * to the next future slot — we don't burst. */
-                        if (g_cfg.lt_reply_interval > 0) {
-                            next_lt_tx += g_cfg.lt_reply_interval;
+                        if (effective_lt_reply > 0) {
+                            next_lt_tx += effective_lt_reply;
                             while (next_lt_tx <= now)
-                                next_lt_tx += g_cfg.lt_reply_interval;
+                                next_lt_tx += effective_lt_reply;
                         }
                         LOG_DBG("run_native_ce_session: proactive link-time "
                                 "sent (interval=%ds, next at +%lds)",
-                                g_cfg.lt_reply_interval,
+                                effective_lt_reply,
                                 (long)(next_lt_tx - now));
                     }
                 } else {
@@ -733,11 +749,9 @@ static int run_native_ce_session(int fd)
              * timer branch so link-times never fire twice per window. */
             {
                 time_t now = time(NULL);
-                if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
+                if (effective_lt_reply <= 0 || now >= next_lt_tx)
                 {
                     uint8_t lt_buf[32];
-                    /* v0.7.1.2: reverted 0 -> 2 (see poll_cycle.c:454
-                     * comment for rationale). */
                     int lt_len = ce_build_link_time(lt_buf,
                                     (int)sizeof(lt_buf), 2);
                     if (lt_len > 0) {
@@ -747,10 +761,10 @@ static int run_native_ce_session(int fd)
                         clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
                         lt_sent_pending = 1;
                         last_lt_tx = now;
-                        if (g_cfg.lt_reply_interval > 0) {
-                            next_lt_tx += g_cfg.lt_reply_interval;
+                        if (effective_lt_reply > 0) {
+                            next_lt_tx += effective_lt_reply;
                             while (next_lt_tx <= now)
-                                next_lt_tx += g_cfg.lt_reply_interval;
+                                next_lt_tx += effective_lt_reply;
                         }
                     }
                 } else {
@@ -838,27 +852,53 @@ static int run_native_ce_session(int fd)
                 /* Q/T = 1 for direct link (always) */
                 g_link_stats.qt = 1;
 
-                /* M6.9.2: do NOT reply to the peer's link-time inline.
+                /* v0.7.3: reply to peer's link-time inline, gated by
+                 * the effective per-port lt_reply_interval.
                  *
-                 * The previous code replied whenever the rate-limit gate
-                 * was open.  Problem: the reply fires on peer-frame arrival
-                 * timing (arbitrary phase), so even when 320s has elapsed
-                 * the actual send is a few seconds PAST the clean 320s
-                 * boundary.  That produces delta=~100 ticks at pcf
-                 * ("100" samples seen in its l * history alongside the
-                 * "1" samples from the proactive-path sends).
+                 * Historical note (M6.9.2, v0.7.0): this inline path
+                 * was REMOVED as a pcf-specific optimisation — the
+                 * reply fired on peer-frame arrival (arbitrary phase),
+                 * not on a clean 320 s boundary, producing delta ≈ 100
+                 * tick samples in pcf's RTT history instead of the
+                 * clean "1" samples we wanted.
                  *
-                 * The proactive 20s timer sends at integer-second multiples,
-                 * so every 16th tick lands on a clean 320s boundary and
-                 * gives delta=0 -> stored as 1 (the min-clamp).  Removing
-                 * the reply-path means link-time goes out ONLY via the
-                 * proactive timer, producing a steady stream of "1" samples.
+                 * That fix turned out to be too blunt: xnet peers need
+                 * the inline reply (matching their own ~20 s keepalive
+                 * cadence) or their smoothed RTT for us stays stuck at
+                 * the 60000 infinity sentinel and their `L` display
+                 * shows Q=301, RTT=600/2.  Linbpq-flexnet (which works
+                 * cleanly with xnet) ALWAYS replies inline.
                  *
-                 * g_link_stats.rtt_smoothed update above still runs, so
-                 * our own RTT estimate is unaffected.
-                 */
-                LOG_DBG("run_native_ce_session: peer link-time received, "
-                        "our reply deferred to proactive timer (M6.9.2)");
+                 * v0.7.3 restores the inline reply but gates it by
+                 * next_lt_tx, so on pcf (interval=320) it still fires
+                 * only once per 320 s window, while on xnet (interval
+                 * ≤ 20 or 0) it fires on every peer keepalive cycle. */
+                time_t now_lt = time(NULL);
+                if (effective_lt_reply <= 0 || now_lt >= next_lt_tx) {
+                    uint8_t lt_buf[32];
+                    int lt_len = ce_build_link_time(lt_buf,
+                                    (int)sizeof(lt_buf), 2);
+                    if (lt_len > 0) {
+                        ax25_send(fd, PID_CE, lt_buf, lt_len);
+                        g_link_stats.tx_bytes += lt_len;
+                        g_link_stats.tx_frames++;
+                        clock_gettime(CLOCK_MONOTONIC, &lt_sent_ts);
+                        lt_sent_pending = 1;
+                        last_lt_tx = now_lt;
+                        if (effective_lt_reply > 0) {
+                            next_lt_tx += effective_lt_reply;
+                            while (next_lt_tx <= now_lt)
+                                next_lt_tx += effective_lt_reply;
+                        }
+                        LOG_DBG("run_native_ce_session: replied inline to "
+                                "peer link-time (interval=%ds)",
+                                effective_lt_reply);
+                    }
+                } else {
+                    LOG_DBG("run_native_ce_session: peer link-time received, "
+                            "reply gated (%lds until next scheduled)",
+                            (long)(next_lt_tx - now_lt));
+                }
             }
             t_start = time(NULL);
             continue;

@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.2-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.2)
+[![stable](https://img.shields.io/badge/release-v0.7.3-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.3)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,76 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.3 (2026-04-21)
+
+Fixes xnet's smoothed-RTT convergence by making the link-time reply
+interval **per-port** and restoring the inline reply path that M6.9.2
+had removed.
+
+**Problem**
+
+After v0.7.0 / M6.9.2, flexnetd sent link-time frames to the peer
+only via the proactive 20 s timer, gated by the global
+`LinkTimeReplyInterval=320`.  On the xnet port this meant one type-1
+frame every 5+ minutes — far too slow for xnet's smoothed-RTT loop,
+which expects continuous ~20 s cadence.  Xnet's smoothed value stayed
+at its 60000-tick infinity sentinel → every type-1 reply it sent to
+us carried the string `"1600"` → its `L` display showed our row as
+`Q=301, RTT=600/2`.
+
+Reference implementation `linbpq-flexnet` (running on IW2OHX-13,
+converging cleanly with xnet to `Q=2, RTT=2/2`) replies with a
+link-time frame:
+- on **every received peer keepalive**
+- on **every received peer link-time**
+- **every 21 s** from its periodic timer
+
+No rate limit.  Our previous "one per 320 s" pacing was the problem.
+
+**Fix**
+
+1. **Per-port `lt_reply_interval`** — `PortCfg` gains a new field; the
+   config parser accepts `lt_reply=<sec>` as an optional token on
+   `Port` lines (same pattern as `route_advert=`).  `-1` means
+   "inherit the global `LinkTimeReplyInterval`".
+2. **Inline reply restored** — when the peer sends us a link-time,
+   we now reply inline with our own (gated by the effective per-port
+   interval).  On xnet ports (`lt_reply=20`) this fires every cycle
+   and xnet's smoothed converges to ≈ 2 s wire value.  On pcf ports
+   (`lt_reply=320`) the gate still fires only once per 320 s window,
+   so the existing pcf behaviour is preserved.
+
+**Configuration**
+
+Recommended `Port` lines:
+
+```
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=20
+Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320
+```
+
+`lt_reply=0` is also valid and means "reply on every peer frame" —
+equivalent to linbpq-flexnet's behaviour.
+
+**Back-compat**
+
+- Existing configs without `lt_reply=` inherit the global
+  `LinkTimeReplyInterval` (default 320 s) — identical to v0.7.2
+  behaviour for those ports.
+- The `route_advert=` syntax is unchanged.
+- Legacy flat-keyword configs (no `Port` blocks) synthesise a
+  `ports[0]` with both `route_advert_interval = -1` and
+  `lt_reply_interval = -1` (inherit globals).
+
+**Expected effect**
+
+- Xnet port: smoothed converges within 2–3 cycles; xnet's `L` row
+  for IW2OHX-3 should move from `Q=301 RTT=600/2` to something near
+  `Q=2 RTT=2/2` (matching the IW2OHX-13 row which runs the reference
+  implementation).
+- Pcf port: unchanged 320 s cadence; pcf's existing behaviour
+  preserved.
 
 ### v0.7.2 (2026-04-21)
 

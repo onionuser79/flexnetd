@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.2 (stable)
+**Current version:** v0.7.3 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -374,28 +374,67 @@ frame is ever classified as it.
 specification.  The proactive 20-s send in the CE session handler
 (used to keep silent pcf peers alive) is unaffected.
 
-**Still open for v0.7.3+**
+**Deferred to v0.7.4+**
 
-Four refinement items remain:
+Three refinement items remain (link-time cadence is resolved in
+v0.7.3 below):
 
-1. **Link-time cadence / value selection** — The specification has
-   the peer emitting `"1600"` once at init, then `"0"` after the
-   first peer keepalive, then going silent.  We still send `"2"`
-   every 320 s.  Aligning exactly (init-only) is the most likely
-   route to pcf `1/1` convergence but needs a test deploy with
-   rollback plan (v0.7.1.1 regression preserved as the cautionary
-   tale).
-2. **Proactive `'3+'` tokens with REJ tolerance** — re-enable
+1. **Proactive `'3+'` tokens with REJ tolerance** — re-enable
    periodic route re-advertisement to pcf with explicit
    non-disconnect REJ handling.
-3. **Routing batches** — pack the dtable into 240-byte multi-record
-   type-3 frames matching the reference cadence.
-4. **State-6 investigation** — understand what triggers pcf's
+2. **Routing batches** — pack the dtable into 240-byte multi-record
+   type-3 frames matching the reference cadence, so peer dtables
+   refresh periodically without our issuing `'3+'`.
+3. **State-6 investigation** — understand what triggers pcf's
    state-6 (`ts_ahead = 0`) so our repeated link-times stop
-   saturating to 4095.
+   saturating to 4095 in the states where pcf expects 180 s.
 
-Tracking input: `flexnet_capture_port1.json` + `PROTOCOL_SPEC.md`.
-Target: pcf's `l *` row for IW2OHX 3-3 converges to `1/1`.
+Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
+and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
+
+### v0.7.3 — Per-port link-time cadence (2026-04-21, stable)
+
+Fixes xnet's smoothed-RTT convergence.  Root cause analysis from the
+2026-04-21 30-minute xnet-port capture:
+
+- Xnet sends us a type-1 link-time frame every ~20 s (in response to
+  our proactive keepalive).  Each arrival updates xnet's smoothed-RTT
+  measurement loop.
+- Our v0.7.0–v0.7.2 code replied to xnet's keepalive/link-time only
+  once every 320 s, gated by the global `LinkTimeReplyInterval`.
+- With 300+ s gaps between our type-1 frames, xnet's internal delta
+  measurement exceeded the 60000-tick abort threshold, so its
+  smoothed value never left the infinity sentinel (60000).
+- On the wire this showed up as xnet sending us `"1600"` forever
+  (= 60000 / 100 encoded), and its `L` display for our row showed
+  `Q=301, RTT=600/2`.
+- Reference implementation `linbpq-flexnet` (running on IW2OHX-13,
+  converging cleanly to `Q=2, RTT=2/2`) replies on every received
+  keepalive and every received link-time, plus once per 21 s timer —
+  no rate limit.
+
+The fix has two parts:
+
+1. **Per-port `lt_reply_interval`** — `PortCfg` gains a new field; the
+   config parser accepts `lt_reply=<sec>` on `Port` lines.  `-1`
+   (default) means "inherit the global `LinkTimeReplyInterval`".
+2. **Inline link-time reply restored** — the M6.9.2 patch (which
+   removed the inline reply to stabilise pcf) is now gated by the
+   per-port `lt_reply_interval`: xnet ports with `lt_reply=20` fire
+   every cycle (linbpq-flexnet pattern); pcf ports with
+   `lt_reply=320` still fire once per 320 s window.
+
+Recommended `Port` configuration:
+
+```
+Port xnet IW2OHX-14 IW2OHX-3 route_advert=60 lt_reply=20
+Port pcf  IW2OHX-12 IW2OHX-3 route_advert=0  lt_reply=320
+```
+
+Back-compat:
+- Existing configs without `lt_reply=` inherit the global — identical
+  to v0.7.2 behaviour.
+- The `route_advert=` syntax is unchanged.
 
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
 
@@ -471,6 +510,7 @@ confirmed wire protocol.
 | v0.7.1.1 | Link-time value 2→0 experiment | **Reverted** (caused link instability) |
 | v0.7.1.2 | v0.7.1.1 reverted back to value=2 | **Stable** |
 | v0.7.2 | Protocol alignment: keepalive format, type-4 seq, link-time unification | **Stable** |
+| v0.7.3 | Per-port `lt_reply_interval` + inline reply restored (fixes xnet smoothed RTT) | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 

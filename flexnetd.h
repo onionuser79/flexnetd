@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.7.2"
+#define FLEXNETD_VERSION        "0.7.3"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -148,6 +148,7 @@ typedef struct {
     int     min_ssid;                          /* SSID range announced to peer */
     int     max_ssid;
     int     route_advert_interval;             /* per-port M6.7 override: -1=use global, 0=disabled, >0=seconds */
+    int     lt_reply_interval;                 /* per-port M6.9 override: -1=use global, 0=every tick, >0=seconds between link-time sends */
 } PortCfg;
 
 typedef struct {
