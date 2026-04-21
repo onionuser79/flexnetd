@@ -26,7 +26,7 @@
 #endif
 
 /* ── Version ──────────────────────────────────────────────────────────── */
-#define FLEXNETD_VERSION        "0.7.1.2"
+#define FLEXNETD_VERSION        "0.7.2"
 
 /* ── Protocol constants ───────────────────────────────────────────────── */
 #define PID_CF                  0xCF
@@ -38,7 +38,14 @@
 #define COUNTER_TICK_MS         10
 #define CE_KEEPALIVE_LEN        241
 #define DEFAULT_POLL_INTERVAL   240
-#define DEFAULT_KEEPALIVE_S     90
+/*
+ * DEFAULT_KEEPALIVE_S — xnet's per-port tick emits a keepalive when
+ * (now - last_ka_tx) > 180000 ms (0x2BF20, hard-coded at VA 0x080507f7).
+ * Earlier flexnetd versions used 90s (from the pre-RE spec guess) which
+ * meant we emitted 2x faster than xnet — harmless but wasteful on RF.
+ * v0.7.2: align with xnet exactly.
+ */
+#define DEFAULT_KEEPALIVE_S     180
 #define DEFAULT_BEACON_S        120
 /*
  * DEFAULT_ROUTE_ADVERT_S — global default for M6.7 periodic re-advertisement
