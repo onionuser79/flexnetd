@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.5 (stable)
+**Current version:** v0.7.6 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -392,6 +392,24 @@ v0.7.3 below):
 Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
 and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
 
+### v0.7.6 — Config recommendation: `lt_reply=0` for xnet (2026-04-21, stable)
+
+Docs-only.  v0.7.3 recommended `lt_reply=20` on xnet ports but live
+testing shows 20 s produces Q=122 RTT=242 in xnet's `L` table — the
+inter-frame delta is ~20 s not ~200 ms.  Reference implementation
+`linbpq-flexnet` (IW2OHX-13, Q=2 RTT=2) replies on every peer frame
+with no rate limit.
+
+`lt_reply=0` gives us that behaviour: `effective_lt_reply <= 0` always
+opens the gate so every peer keepalive / link-time immediately
+triggers a reply from us.  `next_lt_tx` is never advanced (same code
+path works by fall-through).
+
+Pcf behaviour unchanged — `lt_reply=320` still required there.
+
+`flexnetd.conf`, `flexnetd.conf.debug`, and doc comments updated.  No
+code change.
+
 ### v0.7.5 — dtable_merge RTT=0 handling (2026-04-21, stable)
 
 Fix: after v0.7.4 restored all 60 compact-record merges, the
@@ -546,6 +564,7 @@ confirmed wire protocol.
 | v0.7.3 | Per-port `lt_reply_interval` + inline reply restored (fixes xnet smoothed RTT) | **Stable** |
 | v0.7.4 | Destinations-file truncation fix (drop 60 s flush rate limit, write every batch) | **Stable** |
 | v0.7.5 | dtable_merge skips RTT=0 incoming (xnet refresh marker preserves real RTTs) | **Stable** |
+| v0.7.6 | Config: `lt_reply=0` on xnet (docs only — fixes Q/T convergence) | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 

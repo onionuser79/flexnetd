@@ -32,10 +32,12 @@ Role            server
 #
 # Recommendation based on 2026-04-21 fine-tuning:
 #   xnet (IW2OHX-14)  → route_advert=60  (prevents xnet aging out our route)
-#                       lt_reply=20      (xnet's smoothed RTT converges)
+#                       lt_reply=0       (reply on every peer frame; xnet
+#                                         converges to Q=2 RTT=2 only with
+#                                         this; lt_reply=20 sticks at ~240)
 #   pcf  (IW2OHX-12)  → route_advert=0   (PCFlexnet DMs on unsolicited records)
 #                       lt_reply=320     (matches pcf's ts_ahead window)
-Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=20
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=0
 Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320
 
 PollInterval    240

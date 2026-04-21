@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.5-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.5)
+[![stable](https://img.shields.io/badge/release-v0.7.6-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.6)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,48 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.6 (2026-04-21)
+
+**Config recommendation change — xnet port should use `lt_reply=0`, not `lt_reply=20`.**
+
+Docs-only release, no code change.  v0.7.3 introduced per-port
+`lt_reply_interval` and recommended `lt_reply=20` on xnet ports.  Live
+testing showed that 20 s does not converge xnet's smoothed RTT to the
+same level as the linbpq-flexnet reference implementation (which
+replies on every peer frame with no rate limit):
+
+```
+Port   lt_reply  xnet L row for us
+-----  --------  ---------------------------------------
+xnet   320 (v0.7.2) → Q=301 RTT=600/2 (infinity sentinel — never converges)
+xnet    20 (v0.7.3) → Q=122 RTT=242/2 (converges to our send cadence ~24 s)
+xnet     0 (v0.7.6) → Q=2   RTT=2/2   (matches linbpq-flexnet on IW2OHX-13)
+```
+
+With `lt_reply=0`, every peer keepalive and every peer link-time
+immediately triggers a reply from us.  Xnet's inter-frame gap
+measurement collapses from ~20 s to ~200 ms (the L2 round-trip) and
+its smoothed-RTT loop converges to wire value 2.
+
+Pcf behaviour is unchanged — keep `lt_reply=320` on the pcf port.
+The 320 s ts_ahead window means replying faster saturates pcf's RTT
+at 4095.
+
+`flexnetd.conf`, `flexnetd.conf.debug`, and the `LinkTimeReplyInterval`
+comment block are updated with the new recommendation.
+
+**Upgrade:** Pull + rebuild is **optional** (no code change), but edit
+your config:
+
+```diff
+-Port xnet IW2OHX-14 IW2OHX-3 route_advert=60 lt_reply=20
++Port xnet IW2OHX-14 IW2OHX-3 route_advert=60 lt_reply=0
+ Port pcf  IW2OHX-12 IW2OHX-3 route_advert=0  lt_reply=320
+```
+
+Restart flexnetd.  Within 2–3 minutes xnet's `=>l` row for IW2OHX-3
+should move from `Q=122 RTT=242/2` to `Q=2 RTT=2/2`.
 
 ### v0.7.5 (2026-04-21)
 
