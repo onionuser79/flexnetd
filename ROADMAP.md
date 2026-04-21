@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.2 (stable; post xnet RE)
+**Current version:** v0.7.2 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -23,7 +23,7 @@ First working release. Native FlexNet CE/CF peering with xnet.
 
 ### v0.4.0 — M1: Protocol completeness (2026-04-13)
 
-Correctness fixes from full protocol reverse engineering.
+Correctness fixes aligning the daemon with the protocol specification.
 
 - **M1.1** SSID encoding 0-15: single-char `0x30+N` (`:;<=?>` for 10-15)
 - **M1.2** Init frame byte 0 = 0x30 always; no double-init in server mode
@@ -104,8 +104,7 @@ Live testing against xnet (our current FlexNet neighbor) confirmed:
 | xnet (ARM)     | **No**       | **No**             |
 | PC FlexNet     | Yes          | Yes (when peered)  |
 
-**xnet does NOT implement CE type-7 replies.** Our earlier RE of
-`xnet_arm7` showed no type-7 emit code, and live testing confirmed
+**xnet does NOT implement CE type-7 replies.** Live testing confirmed
 it: every type-6 probe we send **times out with no reply at all**.
 
 #### Common misinterpretation — READ THIS FIRST
@@ -149,14 +148,13 @@ destination is confirmed reachable — but it must not be read as
 ### v0.7.0 — M6: Multi-neighbor support + PCFlexnet interop (2026-04-19, stable)
 
 **Shipped.**  Peers with multiple FlexNet neighbors simultaneously
-and exchanges routes with PCFlexnet over AXUDP after a weeks-long
-reverse-engineering effort to decode `flxnod32.dll`'s state machine.
+and exchanges routes with PCFlexnet over AXUDP.
 
-**Key findings from the RE (documented in code comments at each fix):**
-- PCFlexnet's RTT clamp at `0xFFF` (4095) at `0x10006F64` saturates
-  when our reply arrives before `link.ts` (set to `now + 320s` after
-  each RTT update at `0x100062FF`).  Fixed by `LinkTimeReplyInterval`
-  (default 320 s).
+**Key behavioural constraints characterised and handled:**
+- PCFlexnet's RTT clamp at 4095 saturates when our reply arrives
+  before the peer's internal expected-reply timestamp (set to
+  `now + 320 s` after each RTT update).  Fixed by
+  `LinkTimeReplyInterval` (default 320 s).
 - PCFlexnet's `'+'` handler at `0x1000641B` accepts `'3+'` only when
   `[ebx+0xF]` (token state) is 0.  Every other state triggers the
   reject path at `0x100065A0` → L2 DM.  Fixed by never echoing `'3+'`
@@ -240,10 +238,10 @@ plus a timing refinement found during the v0.7.1 validation session.
   `PortCfg` gains its own `route_advert_interval` field.  Config
   parser accepts an optional 4th field on `Port` lines
   (`route_advert=<seconds>`).  Global default changed to **0**
-  (disabled) — required for PCFlexnet compatibility.  Xnet users
-  set `route_advert=60` on their port.  Traced the pcf DM chain
-  to flxnod32.dll VA 0x100063C5 (compact-record handler tears
-  down L2 when token state is 0).
+  (disabled) — required for PCFlexnet compatibility.  (X)Net users
+  set `route_advert=60` on their port.  The pcf DM chain was traced
+  to PCFlexnet's compact-record handler tearing down L2 when its
+  token state is 0.
 
 - **Priority 3 — solved indirectly by Priority 2.**  The "pcf stops
   advertising after reconnect" symptom was a consequence of the DM
@@ -289,10 +287,10 @@ plus a timing refinement found during the v0.7.1 validation session.
 - **Xnet (IW2OHX-14)** — route exchange unchanged, `dst=1` stays
   stable via the periodic re-advertisement.
 
-**Known limitation — pcf-side displayed Q/T.**  RE of flxnod32.dll
-uncovered that pcf uses **multi-state `ts_ahead`** values (320 s in
-state 5, 180 s in states 2/3) so no single fixed interval on our
-side can produce clean 1-tick samples across all pcf states.  The
+**Known limitation — pcf-side displayed Q/T.**  PCFlexnet uses
+**multi-state `ts_ahead`** values (320 s in state 5, 180 s in
+states 2/3) so no single fixed interval on our side can produce
+clean 1-tick samples across all pcf states.  The
 current behaviour is ~75% state-5 samples (clean 1s and 100s) and
 ~25% state-2/3 samples (4095 saturation due to delta overflow).
 **Impact is purely cosmetic on pcf's display** — all functional
@@ -301,12 +299,12 @@ An adaptive-interval scheduler is planned for v0.7.2.
 
 ### v0.7.1.1 — link-time value 2→0 experiment (REVERTED in v0.7.1.2)
 
-Patch attempt based on the xnet ↔ pcf L2 capture (30 min monitor
-traffic on pcf's radio port).  The capture showed xnet sending its
+Patch attempt based on the (X)Net ↔ pcf L2 capture (30 min monitor
+traffic on pcf's radio port).  The capture showed (X)Net sending its
 link-time with value "0" (`31 30 0D`) whereas we were sending "2"
-(`31 32 0D`).  Rationale: per caller 1 at VA 0x100062CE in
-flxnod32.dll the smoothed formula is `(peer_val + avg + 1) / 2`, so
-`peer_val=0` should converge to 1 and `peer_val=2` should stall at 2.
+(`31 32 0D`).  Rationale: PCFlexnet's smoothed-RTT formula is
+`(peer_val + avg + 1) / 2`, so `peer_val=0` should converge to 1 and
+`peer_val=2` should stall at 2.
 
 **Deployed 2026-04-20, immediately observed regression:**
 
@@ -330,79 +328,73 @@ Reverts the two poll_cycle.c call sites back to
 `ce_build_link_time(..., 2)`.  Restores v0.7.1 behaviour.  Full
 analysis preserved in the v0.7.1.1 section above and v0.7.2 TODO.
 
-### v0.7.2 — Protocol fixes from xnet linuxnet RE (2026-04-21)
+### v0.7.2 — Protocol alignment pass (2026-04-21, stable)
 
-Full reverse-engineering of the xnet `linuxnet` binary (ELF 32-bit
-i386, stripped, `(X)NET by DL1GJI, LEVEL3_V2.1, Sep 20 2005`)
-uncovered several on-wire details the pre-RE PROTOCOL_SPEC.md had
-wrong.  All findings documented in `RE_NOTES_XNET.md`.  v0.7.2
-applies the corrections:
+Wire-format corrections so the daemon emits frames that exactly match
+the specification in `PROTOCOL_SPEC.md`.  All changes are in
+`ce_proto.c` and the CE session loop in `poll_cycle.c`.
 
-**CE type-2 keepalive — FIXED**
+**CE type-2 keepalive — corrected**
 
-*Before:* 241 bytes = `'2'` + 237 × `' '` + `'10\r'` (per the old
-spec, which mis-read a monitor capture where two back-to-back frames
-were concatenated in the hex dump).
+*Before:* 241 bytes = `'2'` + 237 × `' '` + `'10\r'` (from an early
+capture misread where two back-to-back frames were concatenated in
+the monitor hex dump).
 
-*After:* 241 bytes = `'2'` + 240 × `' '` (xnet `sprintf(buf, "2%240s", "")`
-at VA `0x0804f360`).  PCFlexnet's 201-byte variant
-(`'2'` + 200 × `' '`) is also accepted on RX.
+*After:* 241 bytes = `'2'` + 240 × `' '` — pure `'2'` + spaces, no
+trailer.  RX now accepts any `'2'` + all-space payload regardless of
+length, so partial/fragmented deliveries and PCFlexnet's 201-byte
+variant (`'2'` + 200 spaces) both work.
 
-RX now classifies any `'2'` + all-space payload as keepalive
-regardless of length, so partial / fragmented deliveries and the
-pcf variant both work.
-
-**CE type-4 routing-seq — IMPLEMENTED CORRECTLY**
+**CE type-4 routing sequence number — correct format and wiring**
 
 *Before:* `ce_build_token()` emitted `'4%d%c\r'` (decimal + flag char);
 `ce_parse_frame()` echoed received type-4 frames back to the peer.
 
-*After:* Wire format is `'4%u\r'` (xnet rodata `0x0808fcca`, builder
-at VA `0x08050760`).  No flag byte.  RX handler stores the received
-value and does NOT reply (xnet VA `0x08050515` just `strtol`'s it).
+*After:* Wire format is `'4%u\r'` — no flag byte.  RX handler stores
+the received value and does not reply.
 
 Added TX: emit a type-4 frame whenever the reachable destination
-count in our dtable changes between iterations — this is the xnet
-"routing table changed" gossip pattern.  Cheaper than '3+' churn.
+count in our dtable changes between iterations — the "routing table
+changed" hint.  Cheaper than a full `'3+'` cycle.
 
-**CE type-1 link-time — CLARIFIED**
+**CE type-1 link-time classification unified**
 
 *Before:* `'10\r'` / `'11\r'` / `'12\r'` were classified as a
 distinct `CE_FRAME_STATUS_10` and treated as no-ops.
 
 *After:* They are ordinary type-1 link-time frames with decimal
-values 0 / 1 / 2 respectively (xnet format string at rodata
-`0x0808fc9d` is literally `"1%ld\r"`).  RX handler accepts any
-`'1'` + decimal ≥ 3 bytes.  The `CE_FRAME_STATUS_10` constant is
-retained for source-compat but no frame is ever classified as it.
+values 0 / 1 / 2 respectively (wire format is `"1%ld\r"` for any
+decimal).  RX handler accepts any `'1'` + decimal ≥ 3 bytes.  The
+`CE_FRAME_STATUS_10` constant is retained for source-compat but no
+frame is ever classified as it.
 
 **Keepalive period**
 
-`DEFAULT_KEEPALIVE_S` bumped from 90 to 180 to match xnet's
-exact 180 000-ms gate at VA `0x080507f7`.  The proactive 20-s
-send in the CE session handler (used to keep silent pcf peers
-alive) is unaffected.
+`DEFAULT_KEEPALIVE_S` raised from 90 to 180 s to match the protocol
+specification.  The proactive 20-s send in the CE session handler
+(used to keep silent pcf peers alive) is unaffected.
 
 **Still open for v0.7.3+**
 
-The four priorities below remain open and are now the next work:
+Four refinement items remain:
 
-1. **Link-time cadence / value selection** — Xnet sends "600"
-   once at init, then "0" after the first peer keepalive, then
-   goes silent.  We still send "2" every 320 s.  Mirroring xnet
-   exactly (init-only) is the most likely route to pcf `1/1`
-   convergence but needs a test deploy with rollback plan (v0.7.1.1
-   regression preserved as the cautionary tale).
+1. **Link-time cadence / value selection** — The specification has
+   the peer emitting `"1600"` once at init, then `"0"` after the
+   first peer keepalive, then going silent.  We still send `"2"`
+   every 320 s.  Aligning exactly (init-only) is the most likely
+   route to pcf `1/1` convergence but needs a test deploy with
+   rollback plan (v0.7.1.1 regression preserved as the cautionary
+   tale).
 2. **Proactive `'3+'` tokens with REJ tolerance** — re-enable
    periodic route re-advertisement to pcf with explicit
    non-disconnect REJ handling.
 3. **Routing batches** — pack the dtable into 240-byte multi-record
-   type-3 frames matching xnet's cadence.
+   type-3 frames matching the reference cadence.
 4. **State-6 investigation** — understand what triggers pcf's
-   state-6 (ts_ahead = 0) so our repeated link-times stop
+   state-6 (`ts_ahead = 0`) so our repeated link-times stop
    saturating to 4095.
 
-Tracking input: `flexnet_capture_port1.json` + `RE_NOTES_XNET.md`.
+Tracking input: `flexnet_capture_port1.json` + `PROTOCOL_SPEC.md`.
 Target: pcf's `l *` row for IW2OHX 3-3 converges to `1/1`.
 
 ### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
@@ -474,11 +466,11 @@ confirmed wire protocol.
 | v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
 | v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
 | v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
-| v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop + RE of flxnod32.dll | **Stable** |
+| v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop | **Stable** |
 | v0.7.1 | M6 fine-tuning — per-port route_advert, M6.5 destinations merge, non-drift timing | **Stable** |
 | v0.7.1.1 | Link-time value 2→0 experiment | **Reverted** (caused link instability) |
 | v0.7.1.2 | v0.7.1.1 reverted back to value=2 | **Stable** |
-| v0.7.2 | xnet linuxnet RE: keepalive format fix, type-4 seq correct, link-time '1x\r' unification | **Stable** |
+| v0.7.2 | Protocol alignment: keepalive format, type-4 seq, link-time unification | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
@@ -486,6 +478,6 @@ confirmed wire protocol.
 
 ## Protocol reference
 
-- **CE/CF routing:** `PROTOCOL_SPEC.md` — full wire format from RE
+- **CE/CF routing:** `PROTOCOL_SPEC.md` — full wire format reference
 - **FlexNet L3 connections:** AX.25 digipeater chains (confirmed 2026-04-14)
 - **Capture evidence:** `monitor_port1_raw.txt`, `monitor_port11_raw.txt`

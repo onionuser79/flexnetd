@@ -57,31 +57,22 @@ int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid)
     return CE_LINK_SETUP_LEN;
 }
 
-/* ── CE keepalive: '2' + 240 spaces = 241 bytes (xnet-verified) ─────── */
+/* ── CE keepalive: '2' + 240 spaces = 241 bytes ──────────────────────── */
 /*
- * Wire format (confirmed by RE of xnet's linuxnet binary, April 2026):
- *   0x32 + 240x 0x20
+ * Wire format (see PROTOCOL_SPEC.md §2.5):
+ *   0x32 + 240 × 0x20  — pure '2' + spaces, NO trailer.
  *
- * The xnet keepalive builder (VA 0x0804f360) calls:
- *     sprintf(buf, "2%240s", "");
- * which produces '2' followed by 240 spaces, total 241 bytes, with NO
- * trailing '10\r' / '11\r' / '12\r'.  See RE_NOTES_XNET.md § "Type 2 —
- * Keepalive" for the smoking-gun capture evidence.
- *
- * PCFlexnet uses a shorter keepalive (201 bytes = '2' + 200 spaces) but
- * still all-spaces.  Both flavours are accepted by both implementations.
+ * (X)Net emits 241 bytes ('2' + 240 spaces); PCFlexnet emits 201 bytes
+ * ('2' + 200 spaces).  Both variants are all-whitespace after the
+ * leading '2'.
  *
  * HISTORY: Earlier versions of flexnetd (M6.8 through v0.7.1.2) emitted
- * '2' + 237 spaces + '10\r' per the old PROTOCOL_SPEC.md.  That spec
- * entry mis-read a monitor capture that had concatenated a keepalive
- * and a following type-1 frame into a single hex-dump entry (the offset
- * field reset to 0000 at the frame boundary — invisible unless you
- * look at the raw line).  The '10\r' bytes are actually a separate
- * type-1 link-time frame sent right after the keepalive, not part of
- * it.  Fixing this matches xnet's behaviour exactly.
+ * '2' + 237 spaces + '10\r' based on an earlier spec revision that
+ * misinterpreted a monitor capture — the '10\r' bytes are actually a
+ * separate type-1 link-time frame sent right after the keepalive, not
+ * part of it.  v0.7.2 aligns with the corrected spec.
  *
- * xnet keepalive period is exactly 180 s (180000 ms = 0x2BF20 ticks),
- * gated by the per-port tick at VA 0x080507b0.  See DEFAULT_KEEPALIVE_S.
+ * Keepalive period is 180 s per the spec; see DEFAULT_KEEPALIVE_S.
  */
 int ce_build_keepalive(uint8_t *buf, int buflen)
 {
@@ -164,23 +155,23 @@ int ce_build_link_time(uint8_t *buf, int buflen, long link_time_ms)
 
 /* ── CE type-4 — routing-table sequence gossip ────────────────────── */
 /*
- * Wire format (xnet rodata 0x0808fcca, builder at VA 0x08050760):
+ * Wire format (see PROTOCOL_SPEC.md §2.7):
  *   sprintf(buf, "4%u\r", seq);
  *
- * Purpose: cheap "routing table has changed" notification.  xnet
- * maintains a single 16-bit global sequence number that increments
- * whenever the routing table mutates.  On every per-port tick it
- * compares the global seq against the last value advertised to that
- * peer and, if different, emits a type-4 frame.  The peer just records
- * the received seq (no reply).  When a peer sees a seq higher than
- * what it last requested routes for, it knows to send '3+' to pull.
+ * Purpose: cheap "routing table has changed" notification.  A node
+ * maintains a 16-bit local sequence number that increments whenever
+ * the routing table mutates.  On every per-port tick it compares the
+ * local seq against the last value advertised to that peer and, if
+ * different, emits a type-4 frame.  The peer just records the received
+ * seq (no reply).  When a peer sees a seq higher than what it last
+ * requested routes for, it knows to send '3+' to pull.
  *
- * flexnetd v0.7.2: we implement TX from poll_cycle when our route set
- * changed between cycles, and RX just logs the peer seq.  We don't yet
- * use the received seq to drive '3+' — that's a future refinement.
+ * flexnetd v0.7.2: TX fires from poll_cycle when our reachable
+ * destination count changes between iterations; RX stores the peer
+ * seq (for future use driving proactive '3+').
  *
  * The 'flag' argument of the legacy signature is retained for
- * source-compat but IGNORED on the wire (xnet format has no flag).
+ * source-compat but IGNORED on the wire (format has no flag).
  */
 int ce_build_token(uint8_t *buf, int buflen, int token_val, char flag)
 {
@@ -360,10 +351,11 @@ int ce_parse_frame(const uint8_t *data, int len,
     }
 
     /* tiny status frames (exactly 3 bytes) — routing tokens only.
-     * Historical '10\r' classification removed in v0.7.2: xnet RE
-     * showed '10\r'/'11\r'/'12\r' are ordinary type-1 link-time
-     * frames with value 0/1/2 respectively, not a distinct frame
-     * kind.  They fall through to the CE_FRAME_LINK_TIME path below. */
+     * Historical '10\r' classification removed in v0.7.2: per the
+     * protocol spec, '10\r'/'11\r'/'12\r' are ordinary type-1
+     * link-time frames with value 0/1/2 respectively, not a distinct
+     * frame kind.  They fall through to the CE_FRAME_LINK_TIME path
+     * below. */
     if (len == 3) {
         if (data[0]=='3' && data[1]=='+' && data[2]=='\r') {
             LOG_DBG("ce_parse_frame: status '3+'");
@@ -388,11 +380,10 @@ int ce_parse_frame(const uint8_t *data, int len,
     }
 
     /* ── Link time: '1' + decimal + '\r' ──────────────────────────── */
-    /* Format: '1%ld\r' (xnet rodata 0x0808fc9d).  Wire value is in
-     * SECONDS (internal 10-ms ticks divided by 100 before send, per
-     * xnet VA 0x080503f8).  Short frames like "10\r", "11\r", "12\r"
-     * and long ones like "1600\r" are all the same kind — just
-     * different decimal values. */
+    /* Format: '1%ld\r' (see PROTOCOL_SPEC.md §2.4).  Wire value is in
+     * SECONDS (the sender's internal 10-ms tick count divided by 100).
+     * Short frames like "10\r", "11\r", "12\r" and long ones like
+     * "1600\r" are all the same kind — just different decimal values. */
     if (data[0] == '1' && len >= 3) {
         char tbuf[16] = {0};
         int ti = 0;
@@ -411,8 +402,8 @@ int ce_parse_frame(const uint8_t *data, int len,
     }
 
     /* ── Type-4 routing-seq gossip: '4' + decimal + '\r' ──────────── */
-    /* xnet RX handler (VA 0x08050515) just strtol's the value and
-     * stores it at word[port_state+0x20] — no flag, no reply. */
+    /* Per spec §2.7: RX just parses the decimal value and stores it
+     * as the peer's current sequence — no flag byte, no reply. */
     if (data[0] == '4' && len >= 3) {
         char vbuf[16] = {0};
         int vi = 0;

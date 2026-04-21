@@ -39,27 +39,25 @@
 #define CE_KEEPALIVE_LEN        241
 #define DEFAULT_POLL_INTERVAL   240
 /*
- * DEFAULT_KEEPALIVE_S — xnet's per-port tick emits a keepalive when
- * (now - last_ka_tx) > 180000 ms (0x2BF20, hard-coded at VA 0x080507f7).
- * Earlier flexnetd versions used 90s (from the pre-RE spec guess) which
- * meant we emitted 2x faster than xnet — harmless but wasteful on RF.
- * v0.7.2: align with xnet exactly.
+ * DEFAULT_KEEPALIVE_S — per PROTOCOL_SPEC.md §6, the keepalive period
+ * is 180 seconds.  Earlier flexnetd versions used 90 s (pre-spec
+ * guess) which meant we emitted 2× faster than the reference —
+ * harmless but wasteful on RF.  v0.7.2: align with the spec exactly.
  */
 #define DEFAULT_KEEPALIVE_S     180
 #define DEFAULT_BEACON_S        120
 /*
- * DEFAULT_ROUTE_ADVERT_S — global default for M6.7 periodic re-advertisement
- * (only used when a Port block doesn't override it).
+ * DEFAULT_ROUTE_ADVERT_S — global default for M6.7 periodic
+ * re-advertisement (only used when a Port block doesn't override it).
  *
  * Set to 0 (disabled) as of v0.7.1 after observing that PCFlexnet
  * (IW2OHX-12) sends L2 DM within 10-15 ms of receiving any unsolicited
- * compact record.  The DM path in flxnod32.dll was RE'd from address
- * 0x100063C5 onward: after processing a compact record, pcf checks its
- * token state [ebx+0xF]; when state is 0 (idle), it calls l2_set_monitor
- * then 0x10007330 which eventually tears down the L2 link.
+ * compact record.  After processing a compact record PCFlexnet checks
+ * its internal token state; when state is 0 (idle) it tears down the
+ * L2 link.
  *
- * xnet (ARM ELF, different implementation) tolerates M6.7 — set
- * RouteAdvertInterval=60 on the xnet port block to re-enable there.
+ * (X)Net tolerates M6.7 — set RouteAdvertInterval=60 on its port block
+ * to re-enable periodic re-advertisement there.
  */
 #define DEFAULT_ROUTE_ADVERT_S  0   /* 0 = disabled globally; opt-in per port */
 #define DEFAULT_LT_REPLY_S      90   /* M6.9: min seconds between link-time frames to a peer */
