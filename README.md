@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.4-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.4)
+[![stable](https://img.shields.io/badge/release-v0.7.5-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.5)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,59 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.5 (2026-04-21)
+
+**Fix: destinations file showing RTT=0 for every entry.**
+
+After the v0.7.4 fix removed the 60-second write gate, users saw 60
+destinations in `fld` — but every one with `RTT=0`.  Debug log showed
+`dtable_merge: IMPR ...  208(20.8s) -> 0(0.0s)` repeating for every
+record.
+
+**Root cause**
+
+Xnet advertises its FlexNet dtable in two rounds after session init:
+
+1. First round (3 compact frames, ~60 unique records): real measured
+   RTTs — `HB9ON 8-8 242`, `I0OJJ 3-3 208`, etc.
+2. Second round (3 more frames, same ~60 records), ~20 s later:
+   every record carries `RTT=0` on the wire.
+
+The second round is almost certainly a protocol-level refresh /
+keepalive marker (or xnet echoing back the routes it knows via us).
+It is NOT a real "zero round-trip" measurement.  But `dtable_merge`
+treated it as an improvement because `0 < 242`, overwriting every
+real RTT with 0.
+
+Raw bytes from the second-round frames confirm `RTT=0` is literally
+what xnet is sending:
+
+```
+0000  CE 33 48 42 39 4F 4E 20 38 38 30 20 48 42 39 4F  |.3HB9ON 880 HB9O|
+                           ^^ ^^ ^^
+                       SSID 8 8  RTT 0
+```
+
+**Fix**
+
+`dtable_merge` now skips the merge entirely when `incoming->rtt == 0`:
+
+- If an entry already exists, touch `last_updated` only — preserve
+  the existing `rtt`, `port`, etc.
+- If no entry exists, skip the insert — a row with `RTT=0` in the
+  displayed `destinations` file is useless, and the destination
+  will re-advertise with a real RTT in the next cycle.
+
+This does not affect withdrawal handling: withdrawn routes arrive
+with `RTT=60000` (or a trailing `-`), never `RTT=0`, so the infinity
+path is unchanged.
+
+**Expected effect**
+
+After the next session setup, the `destinations` file should show
+~60 destinations with their correct RTT values (208, 242, etc.),
+matching what xnet actually measured.
 
 ### v0.7.4 (2026-04-21)
 
