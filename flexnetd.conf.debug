@@ -30,11 +30,13 @@ Role            server
 #   route_advert=0   disables M6.7 periodic re-advertisement on this port
 #   route_advert=60  re-advertise our route every 60s
 #
-# Recommendation based on 2026-04-20 fine-tuning:
+# Recommendation based on 2026-04-21 fine-tuning:
 #   xnet (IW2OHX-14)  → route_advert=60  (prevents xnet aging out our route)
+#                       lt_reply=20      (xnet's smoothed RTT converges)
 #   pcf  (IW2OHX-12)  → route_advert=0   (PCFlexnet DMs on unsolicited records)
-Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60
-Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0
+#                       lt_reply=320     (matches pcf's ts_ahead window)
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=20
+Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320
 
 PollInterval    240
 KeepaliveInterval  90
