@@ -443,25 +443,21 @@ static int run_native_ce_session(int fd)
 
             /* v0.7.7: CE type-4 routing-seq TX is DISABLED.
              *
-             * v0.7.2 added a proactive type-4 TX when our dtable count
-             * changes, based on RE of the xnet `linuxnet` V2.1 binary
-             * which includes a type-4 dispatcher handler (slot 4 of the
-             * jump table at rodata 0x0808fca4).
+             * v0.7.2 added a proactive type-4 TX whenever our dtable
+             * count changed.  Live monitor captures against (X)NET V1.39
+             * show this peer labels type-4 frames as "unknown packet
+             * type" and, ~20 s later, withdraws every route it had
+             * just advertised to us.
              *
-             * Production xnet is V1.39 (per "(X)NET/DLC7 V1.39" banner),
-             * which does NOT have a type-4 handler.  Live monitor
-             * captures our type-4 frame as "FlexNet: unknown packet
-             * type" — and ~20 seconds later xnet withdraws every route
-             * it just advertised to us.  The linbpq-flexnet reference
-             * (running on IW2OHX-13 and keeping 60+ routes stable for
-             * 8+ days with xnet) never emits type-4.
-             *
-             * Removing our proactive type-4 TX matches linbpq-flexnet's
-             * behaviour.  Routes advertised by xnet should now persist.
+             * Reference implementation linbpq-flexnet (running on
+             * IW2OHX-13 and keeping 60+ routes stable for 8+ days
+             * with (X)NET V1.39) never emits type-4.  Skipping our
+             * proactive TX matches that behaviour; routes advertised
+             * by the peer now persist.
              *
              * We still PARSE received type-4 in ce_parse_frame() —
-             * harmless, and keeps us forward-compatible with V2.1
-             * peers that do emit it. */
+             * harmless, and forward-compatible with any future peer
+             * populations that may emit type-4. */
             (void)route_seq;              /* counter still tracked for logs / future use */
             (void)last_seen_dest_count;
             (void)last_seq_tx;

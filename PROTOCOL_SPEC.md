@@ -1,10 +1,13 @@
 # FlexNet / (X)Net Protocol Specification
 
-**Applies to:** (X)Net LEVEL3_V2.1 and PCFlexnet implementations
-**Sources:** Live captures from IW2OHX-14 ↔ IR3UHU-2, IW2OHX-14 ↔ IW2OHX-13,
-IW2OHX-14 ↔ IW2OHX-12; DCC 1995 paper (DK7WJ / N2IRZ); xnet138 sysop manual;
-RMNC_FlexNet_and_PC_FlexNet English excerpt.
-**Revision:** 2026-04-21
+**Applies to:** (X)NET V1.39 and PC/Flexnet 3.3g (tested peers; earlier
+and later releases of both families appear compatible on the subset
+documented here).
+**Sources:** Live protocol captures from IW2OHX-14 ↔ IR3UHU-2,
+IW2OHX-14 ↔ IW2OHX-13, IW2OHX-14 ↔ IW2OHX-12; DCC 1995 paper
+(DK7WJ / N2IRZ); xnet138 sysop manual; RMNC_FlexNet_and_PC_FlexNet
+English excerpt.
+**Revision:** 2026-04-21 (v1.0 release)
 
 ---
 
@@ -199,8 +202,9 @@ a full `3+` cycle and is intended for frequent use.
 
 ### 2.8 Type 5 — Reserved
 
-The dispatcher reserves slot 5 but no implementation emits or
-handles type-5 frames.  Receivers log and drop.  Do not emit.
+Type 5 is reserved in the `'0'..'7'` range but has never been
+observed on the wire and no known implementation emits or handles
+it.  Receivers log and drop.  Do not emit.
 
 ### 2.9 Type 6 — Path / Traceroute REQUEST
 
@@ -510,10 +514,8 @@ through up to 20 configured AX.25 ports.  Per-port work each tick:
 - `flexnet1.pdf` — Italian FlexNet overview (1995).
 - `flexnet_capture_1h.json` — 1-hour live capture, IW2OHX-14,
   April 2026.
-- `flexnet_capture_port1.json` — 30-minute xnet ↔ PCFlexnet capture,
-  April 2026.
-- `xnet/linuxnet` — (X)Net LEVEL3_V2.1 Linux/i386 build,
-  2005-09-20.
+- `flexnet_capture_port1.json` — 30-minute (X)NET ↔ PC/Flexnet
+  live capture, April 2026.
 - `phase1_results.json` — clean ASCII capture (monitor `-x +11`),
   April 2026.
 - `phase2_results.json` — CE frame classification analysis, April 2026.
