@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.4 (stable)
+**Current version:** v0.7.5 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -392,6 +392,24 @@ v0.7.3 below):
 Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
 and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
 
+### v0.7.5 — dtable_merge RTT=0 handling (2026-04-21, stable)
+
+Fix: after v0.7.4 restored all 60 compact-record merges, the
+destinations file showed RTT=0 for every entry.  Cause: xnet
+advertises its full FlexNet dtable in TWO rounds after session init:
+the first round has real measured RTTs (e.g. 208, 242), the second
+round sends the identical records with RTT=0 as a refresh / keepalive
+marker.  `dtable_merge` treated `0 < 242` as an improvement and
+overwrote every real RTT with 0.
+
+Fix: `dtable_merge` now skips merges where `incoming->rtt == 0`.
+Existing entries preserve their real RTT (just `last_updated` is
+touched); no new row is ever inserted with RTT=0 (it would just
+display a useless zero).
+
+Withdrawal semantics unchanged — withdrawn routes arrive with
+RTT=60000 or a `-` trailer, never RTT=0.
+
 ### v0.7.4 — destinations-file truncation fix (2026-04-21, stable)
 
 Latent bug since v0.3.0.  `run_native_ce_session()` rate-limited the
@@ -527,6 +545,7 @@ confirmed wire protocol.
 | v0.7.2 | Protocol alignment: keepalive format, type-4 seq, link-time unification | **Stable** |
 | v0.7.3 | Per-port `lt_reply_interval` + inline reply restored (fixes xnet smoothed RTT) | **Stable** |
 | v0.7.4 | Destinations-file truncation fix (drop 60 s flush rate limit, write every batch) | **Stable** |
+| v0.7.5 | dtable_merge skips RTT=0 incoming (xnet refresh marker preserves real RTTs) | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 

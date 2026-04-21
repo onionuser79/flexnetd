@@ -31,12 +31,48 @@ int dtable_find(const char *callsign, int ssid_lo, int ssid_hi)
 
 /*
  * dtable_merge — merge one received entry.
- * Returns: 1=new, 2=improved, 3=degraded, 0=no change, -1=table full
+ * Returns: 1=new, 2=improved, 3=degraded, 0=no change/skipped, -1=table full
+ *
+ * RTT=0 handling (v0.7.5): xnet advertises its FlexNet dtable in two
+ * rounds after session init — the first with measured RTTs (e.g. 242,
+ * 208), the second ~20 seconds later with RTT=0 for every record.
+ * RTT=0 is not a "measured zero round-trip" — it is either (a) a
+ * refresh/keepalive marker for destinations already in the peer's
+ * dtable, or (b) xnet re-advertising back to us the routes it knows
+ * via us.  Either way, letting it overwrite a real measured RTT via
+ * the "0 < existing_rtt -> improved" path corrupts the display (users
+ * see all RTTs as 0 in `fld` and the D-command).  Skip the update
+ * when incoming rtt == 0 and keep whatever we already have.  If we
+ * have no entry yet, we also skip — the destination will re-advertise
+ * with a real RTT soon enough, and in the meantime we don't want to
+ * pollute the table with a useless RTT=0 row.
  */
 int dtable_merge(const DestEntry *incoming)
 {
     int idx = dtable_find(incoming->callsign,
                           incoming->ssid_lo, incoming->ssid_hi);
+
+    /* v0.7.5: RTT=0 is a protocol marker, not a real measurement.
+     * Skip the merge entirely — preserve existing data if any,
+     * don't insert a new row with RTT=0. */
+    if (incoming->rtt == 0 && !incoming->is_infinity) {
+        if (idx >= 0) {
+            /* Touch last_updated so the entry isn't aged out, but
+             * don't change rtt/port/etc. */
+            g_table.entries[idx].last_updated = time(NULL);
+            LOG_DBG("dtable_merge: KEEP %-9s %2d-%2d  rtt=%s "
+                    "(incoming rtt=0, preserved)",
+                    incoming->callsign,
+                    incoming->ssid_lo, incoming->ssid_hi,
+                    rtt_str(g_table.entries[idx].rtt));
+        } else {
+            LOG_DBG("dtable_merge: SKIP %-9s %2d-%2d  "
+                    "(incoming rtt=0, no existing entry)",
+                    incoming->callsign,
+                    incoming->ssid_lo, incoming->ssid_hi);
+        }
+        return 0;
+    }
 
     if (idx < 0) {
         if (g_table.count >= MAX_DEST_ENTRIES) {
