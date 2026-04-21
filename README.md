@@ -2,7 +2,7 @@
 
 **Version 0.7.1.2 — stable** | Author: IW2OHX | License: GPL v3 | April 2026
 
-[![stable](https://img.shields.io/badge/release-v0.7.7-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.7)
+[![stable](https://img.shields.io/badge/release-v0.7.8-brightgreen.svg)](https://github.com/onionuser79/flexnetd/releases/tag/v0.7.8)
 
 A native FlexNet CE/CF protocol daemon for Linux, enabling direct peering
 with FlexNet nodes (such as xnet) over AX.25 AXUDP links. Replaces the
@@ -831,6 +831,83 @@ flexnetd was developed using a capture-driven approach:
 ---
 
 ## 10. Changelog
+
+### v0.7.8 (2026-04-21)
+
+**Own-route advertisement: send `3+` + record + `3-` token exchange on xnet ports.**
+
+**Symptom after v0.7.7**
+
+After removing the type-4 TX (v0.7.7), destinations reached 115 and
+stayed.  But xnet's `L` row for IW2OHX-3 kept Q climbing (0 → 24 → 71
+→ 119 → 151 → 172 → 217) and xnet kept re-sending its full dtable
+every ~21 s (99 advertisement bursts in the 70-minute session), with
+occasional 5-10 minute silences.
+
+**Root cause**
+
+The linbpq-flexnet reference implementation (IW2OHX-13, Q=2 RTT=2,
+stable 8+ days) wraps its own-route advertisement in a full token
+exchange:
+
+```c
+flex_send_frame(LINK, PID_CE, "3+\r", 3);    // request token
+flex_send_frame(LINK, PID_CE, route, rlen);  // our record
+flex_send_frame(LINK, PID_CE, "3-\r", 3);    // release token
+```
+
+This drives xnet's CE state machine through the synchronisation
+cycle: state 1 → receive `3+` → state 2 → emit records → receive
+`3-` → state 1 (synced).  While synced, xnet's smoothed-RTT loop for
+the peer runs in the "normal" code path and converges to the actual
+link RTT.
+
+Our flexnetd had been sending **record only** (no `3+`, no `3-`) as
+the M6.9.4 pcf-safe path — PCFlexnet DMs the L2 link on an unsolicited
+`3+` when its internal token state is non-zero.  But applying that
+rule globally broke xnet: without the token-exchange closure, xnet
+stays in an "unsynchronised" state, keeps re-advertising its dtable
+trying to sync, and runs its RTT loop in fallback mode which measures
+inter-frame gap (≈ 21 s) instead of actual RTT.
+
+**Fix**
+
+New per-port option `advert_mode`:
+
+| Value    | Behaviour                                         | Suits |
+|----------|---------------------------------------------------|-------|
+| `full`   | `'3+' + record + '3-'` token exchange             | xnet  |
+| `record` | compact record only, no token                     | pcf   |
+
+Default is `full` (xnet-friendly).  PCFlexnet ports MUST explicitly
+set `advert_mode=record` to avoid the DM path.
+
+Recommended `Port` lines:
+
+```
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=0    advert_mode=full
+Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320  advert_mode=record
+```
+
+**Expected effect**
+
+- Xnet's `L` row for IW2OHX-3 should converge to Q=2 RTT=2/2 (matching
+  the linbpq-flexnet IW2OHX-13 reference) within 1-2 minutes of
+  session setup.
+- Xnet stops the periodic 21-second re-advertisement churn (sync
+  now completes, so nothing to retry).
+- Pcf behaviour unchanged.
+
+**Upgrade**
+
+```bash
+sudo vi /usr/local/etc/ax25/flexnetd.conf
+# Add advert_mode=full on the xnet Port line
+# Add advert_mode=record on the pcf Port line (MANDATORY; otherwise
+# default will be 'full' and pcf will DM)
+```
+
+Rebuild + restart as usual.
 
 ### v0.7.7 (2026-04-21)
 

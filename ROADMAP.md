@@ -1,6 +1,6 @@
 # flexnetd — Development Roadmap
 
-**Current version:** v0.7.7 (stable)
+**Current version:** v0.7.8 (stable)
 **Target version:** v1.0.0
 **Author:** IW2OHX
 **Started:** April 2026
@@ -392,6 +392,21 @@ v0.7.3 below):
 Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
 and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
 
+### v0.7.8 — Per-port `advert_mode` (full / record) (2026-04-21, stable)
+
+After v0.7.7 stopped the route withdrawal, xnet's smoothed RTT for us
+still climbed to wire 217 (21.7 s) and xnet kept re-advertising its
+dtable every ~21 s.  linbpq-flexnet (stable Q=2 with xnet) wraps its
+own-route advertisement in a `'3+'` + record + `'3-'` token exchange.
+Our flexnetd had been sending record-only (the M6.9.4 pcf-safe path)
+applied globally since v0.7.1.  That broke xnet's synchronisation
+cycle — without the `'3-'` closure, xnet stays in "trying to sync"
+state and runs its RTT loop in fallback mode.
+
+Fix: new per-port `advert_mode` option (`full` or `record`).  Default
+is `full` (xnet-friendly).  PCFlexnet ports MUST set `advert_mode=record`
+explicitly to avoid the DM path on unsolicited `'3+'`.
+
 ### v0.7.7 — Disable proactive type-4 TX (2026-04-21, stable)
 
 Production xnet identifies as `(X)NET/DLC7 V1.39` and does NOT have
@@ -584,6 +599,7 @@ confirmed wire protocol.
 | v0.7.5 | dtable_merge skips RTT=0 incoming (xnet refresh marker preserves real RTTs) | **Stable** |
 | v0.7.6 | Config: `lt_reply=0` on xnet (docs only — fixes Q/T convergence) | **Stable** |
 | v0.7.7 | Disable proactive type-4 TX (V1.39 drops routes on "unknown packet type") | **Stable** |
+| v0.7.8 | Per-port `advert_mode` (xnet wants `full` `'3+/3-'`, pcf wants `record`) | **Stable** |
 | v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
 | v1.0.0 | Production hardening + full docs | Planned |
 
