@@ -208,15 +208,15 @@ static int ce_send_init_response(int fd)
  * Rationale (M6.9.4 — observed 2026-04-19):
  *   Session 717 showed that even AFTER M6.9.3 (reply-without-'3+'),
  *   our M6.7 periodic re-advertisement still sent '3+' every 60 s.
- *   Pcf's token state after the earlier exchange was 3 (not 0), so
- *   our '3+' hit the reject path (VA 0x100065A0) and pcf DM'd the
- *   link ~2 s later.  Session lived only 1 min 07 s before DISC.
+ *   PCFlexnet's token state after the earlier exchange was 3 (not 0),
+ *   so our '3+' hit its reject path and pcf DM'd the link ~2 s later.
+ *   Session lived only 1 min 07 s before DISC.
  *
- * Observed '3+' acceptance rule in pcf (flxnod32.dll):
- *     '+' handler at VA 0x1000641B requires [ebx+0xF] == 0
- *     else → reject (VA 0x100065A0) → eventually DM
- * We cannot know pcf's token-state remotely, so never send '3+'.
- * For periodic refresh, plain compact records are always safe.
+ * PCFlexnet '3+' acceptance rule: the '+' handler only accepts a
+ * '3+' when the peer's internal token state is 0; otherwise it
+ * rejects and eventually issues DM.  We cannot observe the peer's
+ * token state remotely, so we never send '3+'.  For periodic refresh,
+ * plain compact records (no token) are always safe.
  *
  * Port-aware (M6.7): when g_port_idx is valid, picks the listen_call and
  * SSID range from g_cfg.ports[g_port_idx] so each CE child advertises
@@ -415,20 +415,21 @@ static int run_native_ce_session(int fd)
                 last_stats_write = now;
             }
 
-            /* v0.7.2: CE type-4 routing-seq gossip.
+            /* v0.7.2: CE type-4 routing-seq gossip (see PROTOCOL_SPEC.md §2.7).
              *
-             * xnet per-port tick (RE'd at VA 0x080507b0) emits a type-4
-             * frame whenever our own global routing-seq differs from the
-             * value last advertised to this peer.  Purpose: cheap
-             * "routes changed, pull if you care" hint.
+             * Per spec, a node emits a type-4 frame whenever its own
+             * global routing-seq differs from the value last advertised
+             * to this peer.  Purpose: cheap "routes changed, pull if
+             * you care" hint.
              *
              * We approximate the global seq by watching g_table.count —
              * if it changes between iterations we bump our seq.  This
-             * isn't as fine-grained as xnet (which increments on any
-             * mutation including RTT updates) but is enough to tell the
-             * peer a change occurred without waiting for a '3+' cycle.
+             * is coarser than the reference (which increments on any
+             * mutation including RTT updates) but is enough to tell
+             * the peer a change occurred without waiting for a '3+'
+             * cycle.
              *
-             * TX format (xnet rodata 0x0808fcca): '4%u\r'. */
+             * TX format: '4%u\r'. */
             {
                 int cur_dest_count = dtable_count_reachable();
                 if (cur_dest_count != last_seen_dest_count) {
@@ -463,9 +464,9 @@ static int run_native_ce_session(int fd)
              * gets torn down and reconnected.
              *
              * Send a keepalive every 20 s since the last one we sent.
-             * xnet (which DOES send keepalives of its own — every 180 s
-             * per RE of VA 0x080507f7) still works because our extra
-             * ones are harmless — it just responds.
+             * (X)Net (which DOES send keepalives of its own — every
+             * 180 s per spec) still works because our extra ones are
+             * harmless — it just responds.
              *
              * We also send a link-time probe after the keepalive so the
              * peer's RTT cycle has something to measure against. */
@@ -481,15 +482,14 @@ static int run_native_ce_session(int fd)
                  * PCFlexnet sets its internal expected-reply timestamp to
                  *   link.ts = now + (smoothed+4)*32   (if smoothed < 96)
                  *   link.ts = now + 3200              (otherwise)
-                 * (from RE of flxnod32.dll @ 0x100062FF)
                  *
                  * Ticks are 100ms, so that's now + 12.8s  to  now + 320s.
                  * If our link-time arrives BEFORE link.ts, PCFlexnet
                  * computes delta = now - link.ts = NEGATIVE, which wraps
-                 * and clamps to 4095 (the 0xFFF cap at 0x10006F64).
+                 * and clamps to 4095 (its 12-bit RTT field cap).
                  * That's exactly what we saw: pcf.delay saturates at 4095.
                  *
-                 * xnet doesn't hit this because it initiates its own
+                 * (X)Net doesn't hit this because it initiates its own
                  * link-time exchanges on its cycle.  PCFlexnet only
                  * replies — so WE must respect the interval. */
                 if (g_cfg.lt_reply_interval <= 0 || now >= next_lt_tx)
@@ -557,14 +557,14 @@ static int run_native_ce_session(int fd)
             /* v0.7.1 Priority 2: per-port route_advert_interval override.
              * Evidence from 2026-04-20 capture: even M6.9.4 "record-only"
              * re-advertisement triggers PCFlexnet to DM the L2 link
-             * within 10-15 ms.  The RE at VA 0x100063C5 onward shows
-             * that after processing ANY compact record, pcf checks its
-             * token state — if 0 (idle), it calls l2_set_monitor(0xF)
-             * then 0x10007330 which tears down the link.
+             * within 10-15 ms.  After PCFlexnet processes ANY compact
+             * record it checks its token state — if 0 (idle), it tears
+             * down the link.
              *
-             * xnet doesn't have this behavior, so the per-port knob lets
-             * us enable M6.7 for xnet (where it prevents xnet aging out
-             * our route) and disable it for pcf (where it kills links). */
+             * (X)Net doesn't have this behavior, so the per-port knob
+             * lets us enable M6.7 for xnet (where it prevents xnet aging
+             * our route out) and disable it for pcf (where it kills
+             * links). */
             int port_advert = -1;
             if (g_port_idx >= 0 && g_port_idx < g_cfg.num_ports)
                 port_advert = g_cfg.ports[g_port_idx].route_advert_interval;
@@ -707,10 +707,10 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Keepalive: '2' + N spaces.
-         * xnet uses N=240 (241 bytes total), PCFlexnet uses N=200 (201
-         * bytes total) — both all-spaces, no trailer (xnet RE v0.7.2).
-         * Accept any length ≥ 2 whose body after the '2' is pure space. */
+        /* Keepalive: '2' + N spaces (PROTOCOL_SPEC.md §2.5).
+         * (X)Net uses N=240 (241 bytes total), PCFlexnet uses N=200
+         * (201 bytes total) — both all-spaces, no trailer.  Accept any
+         * length ≥ 2 whose body after the '2' is pure space. */
         int is_keepalive = 0;
         if (len >= 2 && buf[0] == '2') {
             is_keepalive = 1;
@@ -803,9 +803,9 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Link time: '1' prefix + decimal + '\r'.
+        /* Link time: '1' prefix + decimal + '\r' (PROTOCOL_SPEC.md §2.4).
          * Accept any length ≥ 3 — "10\r"/"11\r"/"12\r" are valid
-         * type-1 frames with decimal values 0/1/2 (xnet RE, v0.7.2). */
+         * type-1 frames with decimal values 0/1/2. */
         if (buf[0] == '1' && len >= 3) {
             int lt_val = 0;
             int r = ce_parse_frame(buf, len, NULL, NULL, &lt_val);
@@ -864,13 +864,13 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Type-4 routing-seq gossip: '4' + decimal + '\r'.
+        /* Type-4 routing-seq gossip: '4' + decimal + '\r' (PROTOCOL_SPEC.md §2.7).
          *
-         * xnet RX handler (VA 0x08050515, RE'd April 2026) just
-         * strtol's the value and stores it at word[port_state+0x20].
-         * No reply, no echo.  Purpose is purely informational: when
-         * the peer sees a seq higher than what it last requested
-         * routes for, it knows to issue a '3+' to pull fresh records.
+         * Per spec, the RX handler parses the decimal value and stores
+         * it as the peer's current sequence.  No reply, no echo.
+         * Purpose is purely informational: when the peer sees a seq
+         * higher than what it last requested routes for, it knows to
+         * issue a '3+' to pull fresh records.
          *
          * Previous flexnetd versions echoed the frame back — that
          * caused unnecessary RF churn and, worse, PCFlexnet
@@ -992,13 +992,13 @@ static int run_native_ce_session(int fd)
                  * echo '3+' back.
                  *
                  * M6.9.3 bug fix: previously we sent '3+' + records + '3-'
-                 * in both branches.  Pcf's '+' handler (VA 0x1000641B)
-                 * only accepts '3+' when its token state [ebx+0xF] == 0,
-                 * but pcf set that state to 3 when IT sent its '3+'.
-                 * Our echo therefore hit pcf's reject path (VA 0x100065A0)
-                 * and pcf DISCONNECTED the link within 2 ms of our '3-'.
-                 * Captured 2026-04-19 21:43:12.543→21:43:12.549 in the
-                 * "L 2 iw2ohx-3" trace.
+                 * in both branches.  PCFlexnet's '+' handler only
+                 * accepts '3+' when its internal token state is 0, but
+                 * the peer set that state to non-zero when IT sent its
+                 * '3+'.  Our echo therefore hit pcf's reject path and
+                 * pcf DISCONNECTED the link within 2 ms of our '3-'.
+                 * Captured 2026-04-19 21:43:12.543 → 21:43:12.549 in
+                 * the "L 2 iw2ohx-3" trace.
                  *
                  * Always respond to peer's '3+' with records + '3-' only.
                  * Update the sent_routes / last_routes_tx bookkeeping so
@@ -1020,8 +1020,9 @@ static int run_native_ce_session(int fd)
             }
 
             /* Note: CE_FRAME_STATUS_10 was removed in v0.7.2 after the
-             * xnet RE confirmed '10\r' is an ordinary CE_FRAME_LINK_TIME
-             * with decimal value 0 (a legitimate link-time reply, not a
+             * protocol spec was corrected to classify '10\r' as an
+             * ordinary CE_FRAME_LINK_TIME with decimal value 0 (a
+             * legitimate link-time reply, not a
              * distinct "status 10" frame).  It now falls through into
              * the LINK_TIME path above. */
 
