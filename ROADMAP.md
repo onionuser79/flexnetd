@@ -1,612 +1,217 @@
-# flexnetd — Development Roadmap
+# flexnetd — Roadmap
 
-**Current version:** v0.7.8 (stable)
-**Target version:** v1.0.0
+**Status:** v1.0.0 released — production-ready
 **Author:** IW2OHX
-**Started:** April 2026
+**Timeline:** April 2026
 
 ---
 
-## What's done
+## v1.0.0 — Production release (2026-04-21)
 
-### v0.3.0 — Baseline (2026-04-11)
+First production-ready release.  Peers stably with (X)NET V1.39
+(validated against IW2OHX-14: Q=2 RTT=2 in peer's L-table, matching
+the linbpq-flexnet reference implementation running on IW2OHX-13
+under identical network conditions).  Operational with PC/Flexnet
+3.3g with fine-tuning still in progress — see README.md
+"PC/Flexnet fine-tuning" section for status.
 
-First working release. Native FlexNet CE/CF peering with xnet.
-
-- Server mode: binds IW2OHX-3, accepts neighbor IW2OHX-14 and user sessions
-- Bidirectional route exchange: ~187 destinations, Q/T=1
-- CE protocol: init handshake, keepalive, link time, compact routing, token
-- CF protocol: L3RTT probe/reply for RTT measurement
-- URONode integration: destinations file, gateways file, immediate MOTD
-- Kernel T2=1ms auto-tuning eliminates L2 REJ frames
-- Fork model: CE session in child, user sessions exec URONode
-
-### v0.4.0 — M1: Protocol completeness (2026-04-13)
-
-Correctness fixes aligning the daemon with the protocol specification.
-
-- **M1.1** SSID encoding 0-15: single-char `0x30+N` (`:;<=?>` for 10-15)
-- **M1.2** Init frame byte 0 = 0x30 always; no double-init in server mode
-- **M1.3** L3RTT c3/c4 = 0 when link down, non-zero when active
-- **M1.4** Deferred (CE type-6/7 path query — low priority, safe to skip)
-- **Debug logging:** `-l <logfile>` for dual console+file output
-
-### v0.4.1 — M3 + M4: Operational visibility (2026-04-14)
-
-Link health display, destination query, VIA field.
-
-- **M3** Link health file (`/usr/local/var/lib/ax25/flex/linkstats`)
-  - Updated every 30s, xnet L-table format
-  - Q/T=1 (direct link), RTT from link-time round-trip measurement
-  - Tracks tx/rx bytes, frames, connect time, dst count
-  - `LinkStatsFile` config option
-- **M4.1** VIA callsign in destinations file (replaces `00000`)
-  - `dtable_merge()` preserves `via_callsign` on route updates
-- **M4.2/M4.3** `flexdest` standalone tool for D command
-  - Exact match: `flexdest IR5S`
-  - Prefix wildcard: `flexdest IW*`
-  - SSID-specific: `flexdest IR5S-7`
-  - No libax25 dependency
-
-### v0.5.0 — M2: Digipeater path preservation (2026-04-14)
-
-Outbound FlexNet connects include our node in the AX.25 digipeater via-list.
-
-- **M2.2 Outbound via-list:** URONode gateways file includes IW2OHX-3 as
-  digipeater. `flexnetd/output.c` writes `<neighbor> <dev> <our_call>`.
-  URONode `do_connect()` builds SABM: `fm USER to DEST via IW2OHX-3 IW2OHX-14`
-- **M2 H-bit fix (URONode patch):** `setsockopt(fd, SOL_AX25, AX25_IAMDIGI, &1)`
-  before `connect()`. Without this, the kernel clears all H bits on outbound
-  connections. With `AX25_IAMDIGI`, the kernel honors the H bit we set on
-  `fsa_digipeater[0]`, so IW2OHX-3 goes out as `IW2OHX-3*` (already-repeated).
-  This lets xnet (IW2OHX-14) see the frame as addressed to it.
-
-  **Confirmed live** (2026-04-14): IW7CFD connects from URONode to IR5S,
-  `U` command on IR5S shows: `IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3`
-
-  URONode changes in `gateway.c`:
-  - `#define AX25_IAMDIGI 12` fallback
-  - `setsockopt(fd, SOL_AX25, AX25_IAMDIGI, ...)` for FlexNet connects
-  - H bit `|= 0x80` on first digipeater (our callsign)
-  - Fixed UB in argv building (clean for-loop replacing k++ side-effect)
+All milestones M1–M6 and M5.3 closed.  Multi-port deployment
+supported with per-port overrides for the three peer-specific knobs
+that differ between (X)NET and PC/Flexnet.
 
 ---
 
-### v0.6.0 — M5: Route path display (2026-04-19)
-
-Route trace output per-destination, produced by the peer-to-peer
-path query protocol (CE type-6 REQUEST / type-7 REPLY).
-
-- **M5.3 Full path via CE type-6/7** — implemented.
-  - `ce_build_path_request` / `ce_build_path_reply`
-  - `ce_parse_path_frame`
-  - pending query table with QSO correlation and 30-second timeout
-  - periodic probing with configurable `PathProbeInterval`
-  - path cache file (`/usr/local/var/lib/ax25/flex/paths`)
-- **flexdest `-r`** flag reads the cache and prints a line after each
-  matched destination:
-  ```
-  IR5S      0-15     4 IR3UHU-2
-  *** route: IW2OHX-14 IR3UHU-2 IQ5KG-7 IR5S   [route 3m42s ago]
-  ```
-- Type-6/7 wire format (fully decoded and documented in
-  `PROTOCOL_SPEC.md`):
-  `TYPE + HopCount_byte(0x20+N) + QSO_field(5 bytes, "%5u") + callsigns`
-- M5.1/M5.2 (local partial route) remain as fallback when the cache
-  doesn't yet have an entry for the requested destination.
-
-#### Peer compatibility (live testing, 2026-04-19)
-
-Live testing against xnet (our current FlexNet neighbor) confirmed:
-
-| Peer           | Sends type-7? | Full path display? |
-|----------------|--------------|--------------------|
-| xnet (ARM)     | **No**       | **No**             |
-| PC FlexNet     | Yes          | Yes (when peered)  |
-
-**xnet does NOT implement CE type-7 replies.** Live testing confirmed
-it: every type-6 probe we send **times out with no reply at all**.
-
-#### Common misinterpretation — READ THIS FIRST
-
-When probing was enabled, the log showed type-3 compact records
-arriving shortly after our type-6 probes, and it was tempting to
-read those as "replies" to our probes.  **They are not.**  A
-control run with `PathProbeInterval 0` (no probes sent at all)
-showed the peer still emits exactly the same periodic type-3
-routing updates on its normal ~4-minute broadcast cycle.  The
-type-3 arrivals just happened to coincide with our probe timing.
-
-In short: with an xnet peer, a type-6 probe goes out and is
-discarded by the peer.  Any type-3 that arrives afterwards is
-unrelated routing traffic, not a reply.
-
-The `path_pending` type-3 correlation shortcut in `poll_cycle.c`
-(clearing pending slots when the target callsign appears in a
-type-3) is kept because it is still technically correct — the
-destination is confirmed reachable — but it must not be read as
-"xnet responded to our query".
-
-**Consequences:**
-
-1. Against an xnet-only neighbor, `flexdest -r` will always fall
-   back to the M5.1-style partial route (`... <via> <dest>`).
-2. Full `*** route:` path display requires peering with a
-   PC-FlexNet-based node that implements type-7. This lands
-   automatically once **M6 (multi-neighbor)** is done and we peer
-   with both xnet and a PC-FlexNet node.
-3. Production default for `PathProbeInterval` is now **0**
-   (disabled) to avoid pointless traffic against xnet neighbors.
-   Set to 60 (production) or 10 (debug) when a type-7-capable
-   peer exists.
-4. flexnetd now correlates incoming type-3 records against pending
-   type-6 queries by base callsign and clears the pending slot
-   when matched, so no spurious "UNSOLICITED" warnings are logged.
-   The destination is confirmed reachable (but full hop list is
-   not available from this peer).
-
-### v0.7.0 — M6: Multi-neighbor support + PCFlexnet interop (2026-04-19, stable)
-
-**Shipped.**  Peers with multiple FlexNet neighbors simultaneously
-and exchanges routes with PCFlexnet over AXUDP.
-
-**Key behavioural constraints characterised and handled:**
-- PCFlexnet's RTT clamp at 4095 saturates when our reply arrives
-  before the peer's internal expected-reply timestamp (set to
-  `now + 320 s` after each RTT update).  Fixed by
-  `LinkTimeReplyInterval` (default 320 s).
-- PCFlexnet's `'+'` handler at `0x1000641B` accepts `'3+'` only when
-  `[ebx+0xF]` (token state) is 0.  Every other state triggers the
-  reject path at `0x100065A0` → L2 DM.  Fixed by never echoing `'3+'`
-  and by sending compact-record-only refreshes.
-- Token state can only be 0 immediately after handshake or after
-  specific transitions we cannot observe remotely — so we never
-  proactively initiate token exchanges with pcf; we only reply.
-- xnet's ARM implementation is more permissive and tolerates our
-  older behaviour; the fixes above don't regress xnet's peering.
-
-**v0.7.1 addressed all three open items above — see its section below.**
-
-**Original scope (all delivered):**
-
-**Motivation:** Today IW2OHX-3 only peers with IW2OHX-14 (xnet). If we
-add a second port to peer with IW2OHX-12 (PCFlexnet), we gain:
-- Redundancy if one path fails
-- Direct access to PCFlexnet destinations
-- **Unlocks M2.1** — cross-port transit becomes meaningful when there
-  are two ports to forward between
-
-**Kernel binding constraint — resolved (2026-04-19):**
-
-The question "can we bind the same listen callsign (e.g. IW2OHX-3)
-to multiple AX.25 ports at once?" was settled empirically with
-`tools/test_multi_bind`:
-
-```
-[1] bind IW2OHX-3 on ax1 (SO_BINDTODEVICE=ax1)  → PASS fd=3
-[2] bind IW2OHX-3 on ax2 (SO_BINDTODEVICE=ax2)  → PASS fd=4
-[3] listen() on both                            → PASS
-VERDICT: multi-port same-callsign binding WORKS with SO_BINDTODEVICE.
-```
-
-Linux AX.25 `ax25_bind()` uniqueness check is (callsign + device +
-socket type), so different devices coexist fine as long as each
-socket is pinned with `SO_BINDTODEVICE`. **→ architecture A** is
-the way forward.
-
-**Architecture A (confirmed):**
-
-```
-flexnetd single process, no fork at accept level
-  ├─ listen_fd[0]  bind(CALL) + SO_BINDTODEVICE(port_0)
-  ├─ listen_fd[1]  bind(CALL) + SO_BINDTODEVICE(port_1)
-  └─ select() across all listen_fd[]; on ready → accept()
-          ├─ peer == configured_neighbor[N]  → fork CE/CF handler
-          └─ peer == anything else           → fork+exec uronode
-```
-
-**What's needed:**
-
-| Task | Description | Complexity |
-|------|-------------|------------|
-| **M6.1 Config: repeatable Port block** | New `Port <name> { Neighbor <call>; ListenCall <call>; ... }` syntax, array of `PortCfg` in `FlexConfig` | Low |
-| **M6.2 Multi-listener loop** | `ax25_listen()` once per configured port, `select()` across the array in `run_server()` | Low |
-| **M6.3 Accept dispatch** | Match accepted peer against the neighbor list for the port the accept came from; fork CE session or uronode accordingly | Low |
-| **M6.4 Per-neighbor CE state** | Each forked CE child already has its own session state; the parent doesn't need multi-state, so this is mostly arg-passing hygiene | Low |
-| **M6.5 Shared dtable via file-merge** | Children each write their own `destinations.<port>` and `gateways.<port>` snapshot, parent merges into the single production output file with `flock` to avoid torn reads | Medium |
-| **M6.6 Linkstats per neighbor** | `linkstats` file gains one row per active CE session (peer column becomes the key) | Low |
-
-Each child fork already has a private dtable today, which actually
-*helps* multi-neighbor: no shared-state locking needed inside the
-CE handler.  The only cross-child concern is the destinations file,
-solved by per-child snapshot + parent-side merge (M6.5).
-
-### v0.7.1 — M6 fine-tuning, dual-peer production-ready (2026-04-20, stable)
-
-**Shipped.**  Addresses the three open items flagged at end of v0.7.0
-plus a timing refinement found during the v0.7.1 validation session.
-
-**Fixes delivered:**
-
-- **Priority 1 — via-field tag on compact records** (`e4f42d8`)
-  `ce_parse_compact_records()` gains a `port_idx` parameter; each
-  parsed entry is tagged with the port it arrived on.  `output.c`
-  resolves `Via` via `g_cfg.ports[port].neighbor` instead of the
-  legacy `g_cfg.neighbor`.
-
-- **Priority 2 — per-port `RouteAdvertInterval`** (`efeaef5`)
-  `PortCfg` gains its own `route_advert_interval` field.  Config
-  parser accepts an optional 4th field on `Port` lines
-  (`route_advert=<seconds>`).  Global default changed to **0**
-  (disabled) — required for PCFlexnet compatibility.  (X)Net users
-  set `route_advert=60` on their port.  The pcf DM chain was traced
-  to PCFlexnet's compact-record handler tearing down L2 when its
-  token state is 0.
-
-- **Priority 3 — solved indirectly by Priority 2.**  The "pcf stops
-  advertising after reconnect" symptom was a consequence of the DM
-  cycle, not a separate bug.  With DMs eliminated, pcf's one-shot
-  `'3+'` + route-send at session init is sufficient for the lifetime
-  of the (now indefinite) session.
-
-- **Priority 4 / M6.5 — per-port destinations + flock merge** (`2371865`)
-  Same pattern M6.6 applied to linkstats.  Each CE child writes
-  `destinations.<port>` with its own dtable; `destinations_merge()`
-  runs under flock, picks best-RTT-per-key across peers, writes
-  unified `destinations` with a mix of `Via IW2OHX-12` and
-  `Via IW2OHX-14` as appropriate.
-
-- **Timing — non-drifting link-time scheduler** (`2f44e8c`)
-  Switched the `LinkTimeReplyInterval` gate from "elapsed-since-last"
-  to an absolute wall-clock schedule (`next_lt_tx = last + interval`).
-  Drift from the 20 s proactive timer no longer accumulates; sends
-  now land at exactly N × 320 s, giving clean 1-tick samples in
-  pcf's RTT history instead of mixed 100/200 ticks.
-
-- **Gateways file — multi-port** (`7e5a57b`)
-  `output_write_gateways()` was still using the legacy single-port
-  fields and wrote only `ports[0]`.  Now iterates all configured
-  ports and emits one gateway line per port.  URONode can now
-  resolve routes advertised as `Via IW2OHX-12` (pcf) to the correct
-  outbound kernel interface.
-
-**Configuration impact (back-compat):**
-
-- Old configs without any `Port` lines continue to work unchanged
-  (legacy flat keywords synthesise `ports[0]`).
-- Old configs WITH `Port` lines get the new default `route_advert=0`
-  globally — xnet users should add `route_advert=60` to their xnet
-  `Port` line to keep pre-v0.7.1 behaviour.
-- New files appear in `/usr/local/var/lib/ax25/flex/`:
-  `destinations.<port>`, `destinations.lock` (managed by flexnetd;
-  no manual setup).
-
-**Verified against production peers:**
-- **Pcf (IW2OHX-12)** — session stable indefinitely, route exchange
-  completes, ~100-120 routes via pcf in the unified output.
-- **Xnet (IW2OHX-14)** — route exchange unchanged, `dst=1` stays
-  stable via the periodic re-advertisement.
-
-**Known limitation — pcf-side displayed Q/T.**  PCFlexnet uses
-**multi-state `ts_ahead`** values (320 s in state 5, 180 s in
-states 2/3) so no single fixed interval on our side can produce
-clean 1-tick samples across all pcf states.  The
-current behaviour is ~75% state-5 samples (clean 1s and 100s) and
-~25% state-2/3 samples (4095 saturation due to delta overflow).
-**Impact is purely cosmetic on pcf's display** — all functional
-aspects (route exchange, stability, outbound routing) work correctly.
-An adaptive-interval scheduler is planned for v0.7.2.
-
-### v0.7.1.1 — link-time value 2→0 experiment (REVERTED in v0.7.1.2)
-
-Patch attempt based on the (X)Net ↔ pcf L2 capture (30 min monitor
-traffic on pcf's radio port).  The capture showed (X)Net sending its
-link-time with value "0" (`31 30 0D`) whereas we were sending "2"
-(`31 32 0D`).  Rationale: PCFlexnet's smoothed-RTT formula is
-`(peer_val + avg + 1) / 2`, so `peer_val=0` should converge to 1 and
-`peer_val=2` should stall at 2.
-
-**Deployed 2026-04-20, immediately observed regression:**
-
-- pcf's displayed Q/T went UP (to ~966), not down
-- pcf's history buffer refilled with 4095, 600, 200, 100 samples
-- Xnet's view confirmed the byte change hit the wire (`rtt 600/0`)
-- **Links went down multiple times** — actual instability, not just
-  cosmetic drift
-
-Hypothesis for why value=0 failed at our cadence: the xnet capture
-showed xnet sending value=0 **ONCE per session** (at t=5.32s after
-init), then silent.  We sent value=0 every 320s via the proactive
-timer.  Pcf's state machine may take a "bad peer" branch when
-peer_val=0 arrives repeatedly, triggering L2 DM.
-
-Reverted in v0.7.1.2.
-
-### v0.7.1.2 — revert v0.7.1.1 (2026-04-20, stable)
-
-Reverts the two poll_cycle.c call sites back to
-`ce_build_link_time(..., 2)`.  Restores v0.7.1 behaviour.  Full
-analysis preserved in the v0.7.1.1 section above and v0.7.2 TODO.
-
-### v0.7.2 — Protocol alignment pass (2026-04-21, stable)
-
-Wire-format corrections so the daemon emits frames that exactly match
-the specification in `PROTOCOL_SPEC.md`.  All changes are in
-`ce_proto.c` and the CE session loop in `poll_cycle.c`.
-
-**CE type-2 keepalive — corrected**
-
-*Before:* 241 bytes = `'2'` + 237 × `' '` + `'10\r'` (from an early
-capture misread where two back-to-back frames were concatenated in
-the monitor hex dump).
-
-*After:* 241 bytes = `'2'` + 240 × `' '` — pure `'2'` + spaces, no
-trailer.  RX now accepts any `'2'` + all-space payload regardless of
-length, so partial/fragmented deliveries and PCFlexnet's 201-byte
-variant (`'2'` + 200 spaces) both work.
-
-**CE type-4 routing sequence number — correct format and wiring**
-
-*Before:* `ce_build_token()` emitted `'4%d%c\r'` (decimal + flag char);
-`ce_parse_frame()` echoed received type-4 frames back to the peer.
-
-*After:* Wire format is `'4%u\r'` — no flag byte.  RX handler stores
-the received value and does not reply.
-
-Added TX: emit a type-4 frame whenever the reachable destination
-count in our dtable changes between iterations — the "routing table
-changed" hint.  Cheaper than a full `'3+'` cycle.
-
-**CE type-1 link-time classification unified**
-
-*Before:* `'10\r'` / `'11\r'` / `'12\r'` were classified as a
-distinct `CE_FRAME_STATUS_10` and treated as no-ops.
-
-*After:* They are ordinary type-1 link-time frames with decimal
-values 0 / 1 / 2 respectively (wire format is `"1%ld\r"` for any
-decimal).  RX handler accepts any `'1'` + decimal ≥ 3 bytes.  The
-`CE_FRAME_STATUS_10` constant is retained for source-compat but no
-frame is ever classified as it.
-
-**Keepalive period**
-
-`DEFAULT_KEEPALIVE_S` raised from 90 to 180 s to match the protocol
-specification.  The proactive 20-s send in the CE session handler
-(used to keep silent pcf peers alive) is unaffected.
-
-**Deferred to v0.7.4+**
-
-Three refinement items remain (link-time cadence is resolved in
-v0.7.3 below):
-
-1. **Proactive `'3+'` tokens with REJ tolerance** — re-enable
-   periodic route re-advertisement to pcf with explicit
-   non-disconnect REJ handling.
-2. **Routing batches** — pack the dtable into 240-byte multi-record
-   type-3 frames matching the reference cadence, so peer dtables
-   refresh periodically without our issuing `'3+'`.
-3. **State-6 investigation** — understand what triggers pcf's
-   state-6 (`ts_ahead = 0`) so our repeated link-times stop
-   saturating to 4095 in the states where pcf expects 180 s.
-
-Tracking input: `flexnet_capture_port1.json`, `PROTOCOL_SPEC.md`,
-and the reference implementation `../linbpq-flexnet/FlexNetCode.c`.
-
-### v0.7.8 — Per-port `advert_mode` (full / record) (2026-04-21, stable)
-
-After v0.7.7 stopped the route withdrawal, xnet's smoothed RTT for us
-still climbed to wire 217 (21.7 s) and xnet kept re-advertising its
-dtable every ~21 s.  linbpq-flexnet (stable Q=2 with xnet) wraps its
-own-route advertisement in a `'3+'` + record + `'3-'` token exchange.
-Our flexnetd had been sending record-only (the M6.9.4 pcf-safe path)
-applied globally since v0.7.1.  That broke xnet's synchronisation
-cycle — without the `'3-'` closure, xnet stays in "trying to sync"
-state and runs its RTT loop in fallback mode.
-
-Fix: new per-port `advert_mode` option (`full` or `record`).  Default
-is `full` (xnet-friendly).  PCFlexnet ports MUST set `advert_mode=record`
-explicitly to avoid the DM path on unsolicited `'3+'`.
-
-### v0.7.7 — Disable proactive type-4 TX (2026-04-21, stable)
-
-Production xnet identifies as `(X)NET/DLC7 V1.39` and does NOT have
-a type-4 dispatcher.  My v0.7.2 RE was on a newer V2.1 `linuxnet`
-binary which added a type-4 handler (slot 4 of the jump table at
-rodata 0x0808fca4).  V2.1 was an upstream test release; the deployed
-V1.39 doesn't recognise type-4 and labels our frame as "unknown
-packet type" in its monitor.  ~20 s later it withdraws every route
-it had advertised to us.
-
-linbpq-flexnet (working peer on IW2OHX-13, stable 8+ days) never
-emits type-4.  Our v0.7.2 proactive TX was the wrong addition for
-this peer population.
-
-Fix: disable the `ce_build_token` call in the per-iteration section
-of `run_native_ce_session()`.  RX parse path retained for forward
-compatibility with future V2.1+ peers.  No config change.
-
-### v0.7.6 — Config recommendation: `lt_reply=0` for xnet (2026-04-21, stable)
-
-Docs-only.  v0.7.3 recommended `lt_reply=20` on xnet ports but live
-testing shows 20 s produces Q=122 RTT=242 in xnet's `L` table — the
-inter-frame delta is ~20 s not ~200 ms.  Reference implementation
-`linbpq-flexnet` (IW2OHX-13, Q=2 RTT=2) replies on every peer frame
-with no rate limit.
-
-`lt_reply=0` gives us that behaviour: `effective_lt_reply <= 0` always
-opens the gate so every peer keepalive / link-time immediately
-triggers a reply from us.  `next_lt_tx` is never advanced (same code
-path works by fall-through).
-
-Pcf behaviour unchanged — `lt_reply=320` still required there.
-
-`flexnetd.conf`, `flexnetd.conf.debug`, and doc comments updated.  No
-code change.
-
-### v0.7.5 — dtable_merge RTT=0 handling (2026-04-21, stable)
-
-Fix: after v0.7.4 restored all 60 compact-record merges, the
-destinations file showed RTT=0 for every entry.  Cause: xnet
-advertises its full FlexNet dtable in TWO rounds after session init:
-the first round has real measured RTTs (e.g. 208, 242), the second
-round sends the identical records with RTT=0 as a refresh / keepalive
-marker.  `dtable_merge` treated `0 < 242` as an improvement and
-overwrote every real RTT with 0.
-
-Fix: `dtable_merge` now skips merges where `incoming->rtt == 0`.
-Existing entries preserve their real RTT (just `last_updated` is
-touched); no new row is ever inserted with RTT=0 (it would just
-display a useless zero).
-
-Withdrawal semantics unchanged — withdrawn routes arrive with
-RTT=60000 or a `-` trailer, never RTT=0.
-
-### v0.7.4 — destinations-file truncation fix (2026-04-21, stable)
-
-Latent bug since v0.3.0.  `run_native_ce_session()` rate-limited the
-`output_write_destinations()` call to once every 60 s, so when xnet
-dumps its full ~120-entry dtable in a single 20–30 s burst at
-session setup, only the first batch of 20 records reached disk.
-The rest were merged into `g_table` in memory but the 60 s gate
-blocked the flush, and since xnet goes silent after the initial
-burst (routes are re-advertised only on change), the gate never
-reopened.  Users saw 20 entries in `fld` for the entire session
-lifetime.
-
-Fix: remove the 60 s gate, flush after every compact-record batch.
-One-line change, no config knobs.
-
-### v0.7.3 — Per-port link-time cadence (2026-04-21, stable)
-
-Fixes xnet's smoothed-RTT convergence.  Root cause analysis from the
-2026-04-21 30-minute xnet-port capture:
-
-- Xnet sends us a type-1 link-time frame every ~20 s (in response to
-  our proactive keepalive).  Each arrival updates xnet's smoothed-RTT
-  measurement loop.
-- Our v0.7.0–v0.7.2 code replied to xnet's keepalive/link-time only
-  once every 320 s, gated by the global `LinkTimeReplyInterval`.
-- With 300+ s gaps between our type-1 frames, xnet's internal delta
-  measurement exceeded the 60000-tick abort threshold, so its
-  smoothed value never left the infinity sentinel (60000).
-- On the wire this showed up as xnet sending us `"1600"` forever
-  (= 60000 / 100 encoded), and its `L` display for our row showed
-  `Q=301, RTT=600/2`.
-- Reference implementation `linbpq-flexnet` (running on IW2OHX-13,
-  converging cleanly to `Q=2, RTT=2/2`) replies on every received
-  keepalive and every received link-time, plus once per 21 s timer —
-  no rate limit.
-
-The fix has two parts:
-
-1. **Per-port `lt_reply_interval`** — `PortCfg` gains a new field; the
-   config parser accepts `lt_reply=<sec>` on `Port` lines.  `-1`
-   (default) means "inherit the global `LinkTimeReplyInterval`".
-2. **Inline link-time reply restored** — the M6.9.2 patch (which
-   removed the inline reply to stabilise pcf) is now gated by the
-   per-port `lt_reply_interval`: xnet ports with `lt_reply=20` fire
-   every cycle (linbpq-flexnet pattern); pcf ports with
-   `lt_reply=320` still fire once per 320 s window.
-
-Recommended `Port` configuration:
-
-```
-Port xnet IW2OHX-14 IW2OHX-3 route_advert=60 lt_reply=20
-Port pcf  IW2OHX-12 IW2OHX-3 route_advert=0  lt_reply=320
-```
-
-Back-compat:
-- Existing configs without `lt_reply=` inherit the global — identical
-  to v0.7.2 behaviour.
-- The `route_advert=` syntax is unchanged.
-
-### v0.8.0 — M2.1: Inbound transit digipeating (blocked on M6)
-
-**Status:** Blocked — makes sense only with 2+ FlexNet ports.
-
-**Goal:** When a remote user connects THROUGH our node to a destination
-beyond us, forward the connection (act as AX.25 digipeater between
-ports).
-
-**Key discovery (2026-04-14):** FlexNet L3 connections use **AX.25
-digipeater chains**, NOT CREQ/CACK framing.
-
-Captured evidence (IW7BIA from IW2OHX-12 → IR5S via IR3UHU-2):
-```
-→ fm IW7BIA to IR5S via IW2OHX-12* IW2OHX-14* IR3UHU-2 ctl SABM+
-← fm IR5S to IW7BIA via IR3UHU-2* IW2OHX-14 IW2OHX-12 ctl UA-
-```
-
-Note: in our current single-port setup, the chain does NOT include
-IW2OHX-3 — the FlexNet network routes directly to IW2OHX-14 without
-using us as an intermediate. This is why M2.1 is blocked on M6
-(multi-port): only then does IW2OHX-3 appear as a cross-port bridge.
-
-**What's needed (when M6 is done):**
-
-| Task | Description | Complexity |
-|------|-------------|------------|
-| **M2.1 Digipeater support** | When our callsign appears in an inbound via list, mark ourselves as digipeated and forward to next hop on the other port. Option A: kernel AX.25 digipeating (`/proc/sys/net/ax25/<iface>/digi`). Option B: application-level digi in flexnetd (for cross-port cases the kernel may not handle). | Medium |
-
-**First test (when reached):**
-```bash
-echo 1 > /proc/sys/net/ax25/ax1/digi
-echo 1 > /proc/sys/net/ax25/ax2/digi
-# Try transit from one port through us to the other
-```
-
-### v1.0.0 — Production release
-
-- Full route path display (M5.3 if needed)
-- M2.1 transit fully tested across ports
-- Production hardening, documentation
-
----
-
-## What was discarded
-
-The original ROADMAP planned CREQ/CACK/DREQ session framing for M2
-(connection setup, session state machine, frame builders/parsers).
-Live captures on 2026-04-14 proved this is NOT how xnet handles
-FlexNet L3 connections. The entire CREQ/CACK approach was replaced
-with AX.25 digipeater support, which is simpler and matches the
-confirmed wire protocol.
-
-| Original plan | Status | Reason |
-|---------------|--------|--------|
-| M2.1 CREQ frame builder | Discarded | Not used — xnet uses AX.25 digipeating |
-| M2.3 Session state machine (IDLE→CONNECTING→CONNECTED) | Discarded | No CREQ/CACK handshake exists |
-| CREQ/CACK/DREQ parsers | Discarded | These frames were never observed |
+## Completed milestones
+
+### M1 — Protocol correctness (v0.4.0)
+
+Correctness fixes aligning the daemon with the on-wire protocol.
+
+- **M1.1** SSID encoding 0–15: single-char `0x30+N` (`:;<=>?` for 10–15)
+- **M1.2** Init frame byte 0 always `0x30`; no double-init in server mode
+- **M1.3** L3RTT c3/c4 semantics: zero when link down, non-zero when active
+- **Debug logging** via `-l <logfile>` for dual console + file output
+
+### M2 — Digipeater path preservation (v0.5.0, M2.1 in v0.7.0)
+
+**M2.2 (outbound)** — URONode gateways file includes IW2OHX-3 as a
+digipeater.  URONode outbound connects build a SABM like
+`fm USER to DEST via IW2OHX-3 IW2OHX-14`, with the `H` bit set on
+IW2OHX-3, giving proper digipeater path preservation.
+
+Key kernel behaviour discovered: `ax25_connect()` only honours
+user-supplied `H` bits if `AX25_IAMDIGI` is also set on the socket.
+Without it, the kernel silently clears every `repeated[]` flag.
+The URONode patch (`patches/uronode-m2-digipeater-path.patch`)
+sets `AX25_IAMDIGI` before connect and then `|= 0x80` on the first
+digipeater byte.
+
+Confirmed live 2026-04-14: IW7CFD → URONode → IR5S produces the
+expected `IR5S>IW7CFD-15 v IQ5KG-7 IW2OHX-3` in the destination's
+`U` output.
+
+**M2.1 (inbound transit)** — in place on multi-port deployments:
+when the inbound via-list contains our callsign, the kernel AX.25
+digipeater path (enabled via `/proc/sys/net/ax25/<iface>/digi`)
+forwards the connection across ports.
+
+### M3 — Link-stats output file (v0.4.1)
+
+`/usr/local/var/lib/ax25/flex/linkstats`, refreshed every 30 s, in
+(X)NET `L`-table format.  Tracks Q/T, RTT, tx/rx bytes, frames,
+connect time, destination count.  Multi-port deployments write one
+per-port file and merge via `flock`.
+
+### M4 — Destination query (`flexdest`) (v0.4.1)
+
+Standalone tool `flexdest`:
+- Exact match: `flexdest IR5S`
+- Prefix wildcard: `flexdest IW*`
+- SSID-specific: `flexdest IR5S-7`
+- No libax25 dependency — reads the destinations file directly.
+- `-r` flag shows the recorded hop chain from the paths cache.
+
+VIA field in the destinations file carries the actual next-hop
+callsign (e.g. `IW2OHX-12` or `IW2OHX-14`) rather than `00000`.
+
+### M5 — Route path display (v0.6.0)
+
+Full CE type-6 / type-7 path query protocol:
+- `ce_build_path_request` / `ce_build_path_reply`
+- `ce_parse_path_frame`
+- Pending-query table with QSO correlator and 30-second timeout
+- Periodic probing with configurable `PathProbeInterval`
+- Path cache file (`/usr/local/var/lib/ax25/flex/paths`)
+- `flexdest -r` reads the cache and prints the recorded hop chain
+
+Peer compatibility note: (X)NET V1.39 does NOT emit type-7 replies.
+`PathProbeInterval 0` is recommended in production against that peer
+family to avoid wasteful airtime.  PC/Flexnet does reply.
+
+### M6 — Multi-neighbor / multi-port (v0.7.0 – v0.7.8)
+
+Up to 4 concurrent CE/CF sessions, each on its own port, each with
+its own neighbor and optional per-port overrides.  All sessions
+share one listen callsign (IW2OHX-3) via `SO_BINDTODEVICE`.
+
+Per-port merge of destinations and linkstats: each CE child writes
+its own file (e.g. `destinations.xnet`, `destinations.pcf`) and a
+`flock`-serialised merge produces the unified files, picking the
+lowest-RTT entry per `(callsign, ssid_range)` pair across peers.
+
+**Per-port overrides (the three peer-specific knobs):**
+
+| Knob           | (X)NET V1.39 | PC/Flexnet 3.3g | Global default |
+|----------------|--------------|-----------------|----------------|
+| `route_advert` | `0`          | `0`             | `0`            |
+| `lt_reply`     | `0`          | `320`           | `320`          |
+| `advert_mode`  | `full`       | `record`        | `full`         |
+
+Rationale for each setting is captured in the production
+`flexnetd.conf` and in README §5.
+
+### M5.3 — Path probing hardening (v0.6.0 onwards)
+
+Background probing of the destination table with
+round-robin rotation; probes skip entries with `rtt >= Infinity` or
+whose callsign is our own.  Replies populate the path cache read by
+`flexdest -r`.  Interval configurable; default disabled against
+(X)NET peers.
+
+### Proactive keepalive cadence tuning (v0.7.9 → v1.0.0)
+
+Final tuning step that delivered the production-stable release.
+
+The 20-second proactive keepalive introduced during M6 as a
+PC/Flexnet session-keeper was dominating (X)NET's IIR smoothed-RTT
+filter.  (X)NET uses inter-frame delta of our outbound CE frames as
+its sample stream; at 20 s cadence it converged the displayed RTT to
+~200 ticks (20 s) instead of the ~2 ticks (200 ms) seen with
+linbpq-flexnet.
+
+**Evidence (capture 2026-04-21):**
+- Our outbound CE bursts: Δ = 20-22 s (avg 20.7)
+- (X)NET V1.39 native KAs: Δ = 189 s (9× longer)
+- (X)NET IIR wire value converged to 171 ticks (17.1 s) as we
+  expected for the 20 s sample stream
+- linbpq-flexnet (IW2OHX-13, stable Q=2 RTT=2 for 8+ days): NO
+  proactive timer, pure echo on peer events
+
+**Fix:** proactive KA threshold 20 s → 300 s.  (X)NET's 189 s native
+KAs always preempt our proactive timer, so we behave like
+linbpq-flexnet on an active link (event-driven echo) while still
+giving PC/Flexnet a 5-minute safety-net nudge if it goes silent.
+
+**Result:** xnet's L-table for IW2OHX-3 converges to Q=2 RTT=2 within
+minutes of session setup — matching the linbpq-flexnet reference.
 
 ---
 
 ## Version summary
 
-| Version | What | Status |
-|---------|------|--------|
-| v0.3.0 | Basic CE/CF peering, route exchange, Q/T=1 | **Released** |
-| v0.4.0 | Protocol correctness (SSID, init, L3RTT) + debug logging | **Released** |
-| v0.4.1 | Link health, VIA field, flexdest D-command tool | **Released** |
-| v0.5.0 | Outbound digipeater path preservation (H-bit + AX25_IAMDIGI) | **Released** |
-| v0.6.0 | M5 — Route path display (type-6/7 query + flexdest -r) | **Stable** |
-| v0.7.0 | M6 — Multi-neighbor + PCFlexnet interop | **Stable** |
-| v0.7.1 | M6 fine-tuning — per-port route_advert, M6.5 destinations merge, non-drift timing | **Stable** |
-| v0.7.1.1 | Link-time value 2→0 experiment | **Reverted** (caused link instability) |
-| v0.7.1.2 | v0.7.1.1 reverted back to value=2 | **Stable** |
-| v0.7.2 | Protocol alignment: keepalive format, type-4 seq, link-time unification | **Stable** |
-| v0.7.3 | Per-port `lt_reply_interval` + inline reply restored (fixes xnet smoothed RTT) | **Stable** |
-| v0.7.4 | Destinations-file truncation fix (drop 60 s flush rate limit, write every batch) | **Stable** |
-| v0.7.5 | dtable_merge skips RTT=0 incoming (xnet refresh marker preserves real RTTs) | **Stable** |
-| v0.7.6 | Config: `lt_reply=0` on xnet (docs only — fixes Q/T convergence) | **Stable** |
-| v0.7.7 | Disable proactive type-4 TX (V1.39 drops routes on "unknown packet type") | **Stable** |
-| v0.7.8 | Per-port `advert_mode` (xnet wants `full` `'3+/3-'`, pcf wants `record`) | **Stable** |
-| v0.8.0 | M2.1 — Inbound transit digipeating (requires M6) | Blocked on M6 |
-| v1.0.0 | Production hardening + full docs | Planned |
+| Version   | Scope                                                                        | Status   |
+|-----------|------------------------------------------------------------------------------|----------|
+| v0.3.0    | Baseline CE/CF peering, route exchange, Q/T=1                                | Released |
+| v0.4.0    | M1 — protocol correctness (SSID / init / L3RTT)                              | Released |
+| v0.4.1    | M3 + M4 — link-stats file, VIA field, `flexdest`                             | Released |
+| v0.5.0    | M2 — outbound digipeater path preservation (H-bit + AX25_IAMDIGI)            | Released |
+| v0.6.0    | M5 — CE type-6/7 path query, `flexdest -r`                                   | Stable   |
+| v0.7.0    | M6 — multi-neighbor / multi-port, PC/Flexnet interop                         | Stable   |
+| v0.7.1    | M6 fine-tuning — per-port `route_advert`, destinations merge                 | Stable   |
+| v0.7.1.2  | link-time value back to 2 (reverted 0-experiment)                             | Stable   |
+| v0.7.2    | keepalive format alignment, type-4 seq tracking, LT unification               | Stable   |
+| v0.7.3    | per-port `lt_reply` + inline reply restored                                  | Stable   |
+| v0.7.4    | destinations-file truncation fix (drop 60 s flush rate limit)                | Stable   |
+| v0.7.5    | `dtable_merge` skips RTT=0 incoming (preserves real RTTs)                    | Stable   |
+| v0.7.6    | config: `lt_reply=0` on (X)NET ports                                         | Stable   |
+| v0.7.7    | disable proactive type-4 TX (V1.39 treats it as unknown and drops routes)    | Stable   |
+| v0.7.8    | per-port `advert_mode` ((X)NET wants `full`, PC/Flexnet wants `record`)      | Stable   |
+| v0.7.9    | proactive KA cadence 20 s → 300 s (fixes (X)NET smoothed-RTT convergence)    | Stable   |
+| **v1.0.0** | **Production release — all milestones closed**                             | **Released** |
+
+---
+
+## Discarded designs
+
+| Approach                                      | Reason                                                       |
+|-----------------------------------------------|--------------------------------------------------------------|
+| CREQ frame builder for L3 connections (M2.1)  | Not used — FlexNet L3 rides AX.25 digipeater chains          |
+| CREQ/CACK/DREQ session state machine          | No such handshake is emitted by any tested peer               |
+| Proactive CE type-4 "routes changed" TX       | (X)NET V1.39 treats it as unknown and withdraws routes        |
+| 20 s proactive keepalive on every link        | Dominates (X)NET's IIR; replaced with 300 s safety net        |
+| Global-only `route_advert` / `lt_reply`       | Peer behaviours diverge; replaced with per-port overrides      |
+
+---
+
+## Post-v1.0 — follow-ups
+
+These items are NOT required for v1.0 production use but may be
+addressed in a future v1.1+ release:
+
+### PC/Flexnet fine-tuning
+
+Link is stable but PC/Flexnet's displayed RTT does not yet converge
+to the ideal 1 tick.  Current behaviour: link stays up indefinitely
+with `lt_reply=320` matching pcf's ts_ahead window.  Investigation
+areas for a future release:
+
+- Alternative link-time values (currently hard-coded `2`)
+- ts_ahead negotiation vs. fixed-interval emission
+- Interaction between the 300 s proactive KA (v0.7.9) and pcf's
+  own keepalive model
+
+### Further peer populations
+
+v1.0 is validated against (X)NET V1.39 and PC/Flexnet 3.3g.  Other
+(X)NET releases (1.38, 2.x) and older PC/Flexnet versions are
+expected to work on the documented protocol subset but have not
+been bench-tested.
 
 ---
 
 ## Protocol reference
 
-- **CE/CF routing:** `PROTOCOL_SPEC.md` — full wire format reference
+- **CE/CF wire format:** `PROTOCOL_SPEC.md`
 - **FlexNet L3 connections:** AX.25 digipeater chains (confirmed 2026-04-14)
-- **Capture evidence:** `monitor_port1_raw.txt`, `monitor_port11_raw.txt`
+- **Capture evidence:** `monitor_port1_raw.txt`, `monitor_port11_raw.txt`,
+  `flexnet_v0.7.3_xnet_port6.json`

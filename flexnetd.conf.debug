@@ -1,22 +1,23 @@
 # /usr/local/etc/ax25/flexnetd.conf.debug
-# flexnetd — DEBUG configuration for M5.3 testing
+# flexnetd v1.0 — DEBUG configuration
 #
 # Usage:
 #   sudo /usr/local/sbin/flexnetd_debug -f -vvv \
-#       -l /tmp/flexnetd_m53.log \
+#       -l /tmp/flexnetd_debug.log \
 #       -c /usr/local/etc/ax25/flexnetd.conf.debug
 #
 # This enables:
 #   - Foreground mode (-f) so you can Ctrl-C
-#   - DEBUG log level (-vvv) with hex dumps of every type-6/7 frame
+#   - DEBUG log level (-vvv) with hex dumps of every CE/CF frame
 #   - Dual console + file logging (-l)
-#   - Fast probe interval (10s) for quick test/feedback loops
+#   - Fast probe interval (10 s) for quick test/feedback loops
 #
-# Then watch what is happening:
-#   tail -F /tmp/flexnetd_m53.log
+# Monitor:
+#   tail -F /tmp/flexnetd_debug.log
 #   watch -n1 'cat /usr/local/var/lib/ax25/flex/paths'
 #   flexdest -r ir5s
 
+# ── Identity ─────────────────────────────────────────────────────────
 MyCall          IW2OHX-3
 Alias           OHXGW
 MinSSID         3
@@ -24,43 +25,28 @@ MaxSSID         3
 
 Role            server
 
-# ── FlexNet ports (M6 multi-port syntax) ─────────────────────────────
-# Optional 4th field: route_advert=<seconds> overrides the global
-# RouteAdvertInterval for THIS port only.
-#   route_advert=0   disables M6.7 periodic re-advertisement on this port
-#   route_advert=60  re-advertise our route every 60s
-#
-# Recommendation based on 2026-04-21 fine-tuning:
-#   xnet (IW2OHX-14)  → route_advert=60  (prevents xnet aging out our route)
-#                       lt_reply=0       (reply on every peer frame; xnet
-#                                         converges to Q=2 RTT=2 only with
-#                                         this; lt_reply=20 sticks at ~240)
-#                       advert_mode=full (send '3+'/record/'3-' token cycle;
-#                                         required for xnet's sync to
-#                                         complete, which lets its smoothed
-#                                         RTT loop settle)
-#   pcf  (IW2OHX-12)  → route_advert=0   (PCFlexnet DMs on unsolicited records)
-#                       lt_reply=320     (matches pcf's ts_ahead window)
-#                       advert_mode=record (never send '3+' — pcf DMs on
-#                                         unsolicited token requests)
-Port xnet  IW2OHX-14  IW2OHX-3  route_advert=60  lt_reply=0    advert_mode=full
-Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0   lt_reply=320  advert_mode=record
+# ── FlexNet ports (multi-port syntax, v0.7.0+) ───────────────────────
+# Same peer settings as production flexnetd.conf.
+Port xnet  IW2OHX-14  IW2OHX-3  route_advert=0  lt_reply=0    advert_mode=full
+# Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0  lt_reply=320  advert_mode=record
 
-PollInterval    240
-KeepaliveInterval  90
-BeaconInterval  120
+PollInterval       240
+KeepaliveInterval   90
+BeaconInterval     120
 
 GatewaysFile    /usr/local/var/lib/ax25/flex/gateways
 DestFile        /usr/local/var/lib/ax25/flex/destinations
 LinkStatsFile   /usr/local/var/lib/ax25/flex/linkstats
 PathsFile       /usr/local/var/lib/ax25/flex/paths
 
-# DEBUG: probe every 10 seconds — full table of 200 dests scanned
-# in about 33 minutes.  Bump down to 5s for extra aggression if needed.
+# DEBUG: fast path-probe cadence (production default is 0).
 PathProbeInterval  10
 
-Infinity        60000
-TriggerThreshold  50
+RouteAdvertInterval    0
+LinkTimeReplyInterval 320
 
-LogLevel        4
-Syslog          no
+Infinity          60000
+TriggerThreshold     50
+
+LogLevel          4
+Syslog            no
