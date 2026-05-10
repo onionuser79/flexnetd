@@ -1,0 +1,4 @@
+# Enforce LF line endings for all text files in the working tree.
+# Build target is Linux (iw2ohx-gw); CRLF would break shell scripts and
+# create churn if files are touched by Windows-aware editors.
+* text=auto eol=lf
