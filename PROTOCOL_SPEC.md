@@ -7,7 +7,10 @@ documented here).
 IW2OHX-14 ↔ IW2OHX-13, IW2OHX-14 ↔ IW2OHX-12; DCC 1995 paper
 (DK7WJ / N2IRZ); xnet138 sysop manual; RMNC_FlexNet_and_PC_FlexNet
 English excerpt.
-**Revision:** 2026-04-21 (v1.0 release)
+**Revision:** 2026-05-15 (added findings from the linbpq-flexnet v2.0
+GA investigation cycle: INIT `max_ssid` clamping, SSID-range
+advertisement mechanics, PID=CF dispatcher pattern, AX.25 V2
+digi-chain reciprocity).
 
 ---
 
@@ -84,6 +87,17 @@ frame as a type-3.  Byte 1 advertises the highest SSID the sender
 accepts.  Bytes 2–3 are capability flags (`%!`).
 
 Exchanged immediately after the AX.25 session comes up.
+
+**Observed clamping behaviour:** (X)Net uses byte 1 of the init
+frame to bound the SSID range it will accept in subsequent compact
+records from this peer.  If the sender declares `max_ssid = 5` in
+init but later advertises a record with `SSID_HI = 8`, the receiver
+clamps the stored entry's `SSID_HI` to 5 (and discards the
+upper portion of the range).
+
+A node that wants to advertise a contiguous SSID range MUST set
+byte 1 of its init handshake to cover the upper edge of that range,
+**not** the node's own SSID.  See §2.6.1.
 
 ### 2.4 Type 1 — Link-time measurement
 
@@ -180,6 +194,49 @@ Transitions:
 Route exchanges happen at cycle boundaries (~240 s between full
 cycles), not on every individual RTT change.
 
+### 2.6.1 SSID-range advertisement
+
+A single compact record encodes a contiguous SSID range when its
+`SSID_LO` and `SSID_HI` bytes differ.  (X)Net and PC/Flexnet both
+store the range as a single destination-table entry and display
+it in `D` output as `CALLSIGN SSID_LO-SSID_HI`.
+
+Wire example — node `IR2UFV` advertising the range 0–8 with RTT = 1:
+```
+'3' 'I' 'R' '2' 'U' 'F' 'V' '0' '8' '1' ' ' '\r'
+33 49 52 32 55 46 56 30 38 31 20 0D
+```
+
+Decode:
+- frame-type marker `'3'`
+- 6-byte callsign `IR2UFV` (already exactly 6 chars, no space pad)
+- `SSID_LO` = `'0'` (0)
+- `SSID_HI` = `'8'` (8)
+- RTT digits = `"1"` (one 100-ms tick)
+- single space terminator, then `'\r'`
+
+Receivers parsing this record store one D-table entry covering all
+SSIDs 0..8 on the callsign.  A subsequent `C IR2UFV-5` from any
+peer will be routed toward the advertising node.
+
+**Single-SSID is a degenerate range** (`SSID_LO == SSID_HI`).  The
+wire encoding is identical for a range and a single-SSID record;
+receivers don't need to switch parsing paths.
+
+**Init-handshake dependency** (§2.3).  An originating node that
+wants its `SSID_HI = 8` advert honoured by xnet must send
+`max_ssid = 8` in its init handshake.  If it sends `max_ssid = 0`
+(typical when blindly using the node's own SSID), xnet stores
+only `SSID_LO..max_ssid_seen` and silently drops the rest of the
+range.
+
+**Inbound dispatch is application-layer.**  Advertising the range
+only makes the range *reachable* on the FlexNet cloud; what happens
+when a peer issues `C CALLSIGN-N` for `N` inside the range depends
+on whether the receiving node has an application bound to that
+SSID (BBS, chat, mail gateway, etc.) or treats it as the node
+command parser.  See §3.3 / §5.
+
 ### 2.7 Type 4 — Routing-table sequence number
 
 ```
@@ -256,6 +313,32 @@ Length grows with each hop added; a typical short reply is about
 ---
 
 ## 3. PID = CF — NET/ROM-Compatible Layer
+
+### 3.0 Dispatcher pattern
+
+PID = CF on a FlexNet-flagged AX.25 link carries multiple payload
+families: L3RTT probes (FlexNet's own), NetROM L3 NODES broadcasts,
+and the full NetROM L4 message set (CREQ, CACK, INFO, IACK, DREQ,
+DACK).  A receiver MUST dispatch by **payload content**, not by
+PID alone.
+
+Recommended pattern:
+
+1. Locate the literal byte string `"L3RTT:"` anywhere in the
+   payload.  (X)Net wraps L3RTT probes inside a NetROM L3 envelope,
+   so the marker sits at offset ~15, not at offset 0.  A binary
+   substring search over the whole payload is safe — the downstream
+   parser already uses search-style scanning.
+2. If `"L3RTT:"` is present → dispatch to the L3RTT handler (§3.1).
+3. Otherwise → hand the buffer to the host NetROM L3/L4 dispatcher,
+   which will deliver CACK/INFO/IACK to the originating user
+   session, NODES broadcasts to the routes table, etc.
+
+A naïve dispatcher that swallows every PID=CF frame as L3RTT will
+silently drop user CACK/INFO and the originating user session
+will time out even though the L3 handshake completed.  This is the
+single most common integration bug for hosts adding FlexNet on top
+of an existing NetROM stack.
 
 ### 3.1 L3RTT — Round-trip-time probe
 
@@ -373,6 +456,37 @@ The CREQ L3 payload carries the originator explicitly:
 ```
 CREQ payload: <originating_callsign> <forwarding_node>
 ```
+
+### 5.1 AX.25 V2 reciprocity — digi-chain transit caveat
+
+AX.25 V2 requires the UA response's digi list to be the **reverse**
+of the SABM's digi list — same nodes in opposite order, only the
+`*` "already repeated" flags update along the way.  Any node that
+**adds** its own callsign to the digi chain on the forward path
+breaks this invariant: the UA returns through the extended chain
+and arrives at the originator with **one more digi** than was sent,
+and AX.25 V2 rejects the UA.
+
+This rules out a transit forwarding pattern where an intermediate
+FlexNet node receives a SABM addressed to a destination it can
+reach through a different neighbour and tries to relay by
+prepending its own neighbour-callsign as an extra L2 digi.  The
+forward path appears to succeed (the far end returns a UA + data),
+but the originating node cannot bind the UA to its pending session.
+
+Acceptable approaches for transit forwarding:
+
+1. **Pure L2 digipeat.**  Update `*` flags as the frame passes
+   through, never extend the chain.  Requires the originator to
+   have included the transit node in its SABM digi list from the
+   start.
+2. **NetROM L3 forwarding.**  Rewrite at L3 with a fresh L2
+   SABM/UA on each hop.  The L3 envelope preserves the originator
+   identity (§5); each hop's L2 session is independent.
+
+linbpq-flexnet's v1.9.4 attempt at distance-vector
+re-advertisement plus L2 digi-chain extension hit this exact wall
+and was reverted in v1.9.7.
 
 ---
 
@@ -502,6 +616,21 @@ through up to 20 configured AX.25 ports.  Per-port work each tick:
     concatenate adjacent frames into one display entry (the dump's
     offset field resets to `0000` at the boundary).  Do not assume
     a single displayed block is a single on-wire frame.
+17. When advertising a contiguous SSID range (§2.6.1), set the
+    type-0 init handshake byte 1 (`max_ssid`) to the upper edge of
+    the range.  Using the node's own SSID here causes (X)Net to
+    silently truncate the advert (§2.3).
+18. When integrating FlexNet onto a host with an existing NetROM
+    stack (LinBPQ, JNOS, etc.), dispatch PID=CF by **payload
+    content** (§3.0): scan for `"L3RTT:"` and only consume the
+    frame if found; otherwise return control to the host's NetROM
+    L3/L4 dispatcher.  Unconditional PID=CF capture drops user
+    CACK/INFO and prevents session establishment.
+19. Do not extend the AX.25 L2 digi chain in transit (§5.1).
+    Either pure L2 digipeat (no chain extension) or full NetROM
+    L3 forwarding (fresh L2 session per hop).  Adding a digi
+    mid-route breaks AX.25 V2 reciprocity and the originator
+    rejects the UA.
 
 ---
 
