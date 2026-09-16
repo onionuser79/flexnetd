@@ -64,7 +64,7 @@ install: $(TARGET) flexdest
 	install -m 755 flexdest $(SBINDIR)/flexdest
 	@echo "Installed $(SBINDIR)/$(TARGET) and $(SBINDIR)/flexdest"
 	@if [ ! -f $(CONFDIR)/flexnetd.conf ]; then \
-	    install -m 644 ../flexnetd.conf $(CONFDIR)/flexnetd.conf; \
+	    install -m 644 flexnetd.conf $(CONFDIR)/flexnetd.conf; \
 	    echo "Installed $(CONFDIR)/flexnetd.conf"; \
 	else echo "Skipped $(CONFDIR)/flexnetd.conf (exists)"; fi
 

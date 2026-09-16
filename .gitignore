@@ -1,0 +1,15 @@
+# Local, unversioned URONode source tree used to develop and test the
+# patch in patches/. Not part of this project: URONode has its own
+# upstream and licence. Previously committed as a gitlink with no
+# .gitmodules entry, which left a fresh clone with a directory git
+# could never populate.
+URONode/
+
+# Build artefacts
+flexnetd
+flexnetd_debug
+flexnetd_asan
+flexdest
+tools/test_multi_bind
+*.o
+*.d
