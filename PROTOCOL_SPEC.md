@@ -474,19 +474,65 @@ prepending its own neighbour-callsign as an extra L2 digi.  The
 forward path appears to succeed (the far end returns a UA + data),
 but the originating node cannot bind the UA to its pending session.
 
+> **CORRECTED 2026-09-17 — the conclusion above was too strong.**
+> Extension breaks V2 only if the node fails to **contract** on the
+> reverse path.  A capture taken *on* PC/Flexnet IW2OHX-12 while it
+> forwarded a user session shows it doing **both**, symmetrically, and
+> that is how real FlexNet multi-hop transit works.  See §5.2.
+
 Acceptable approaches for transit forwarding:
 
 1. **Pure L2 digipeat.**  Update `*` flags as the frame passes
    through, never extend the chain.  Requires the originator to
    have included the transit node in its SABM digi list from the
-   start.
-2. **NetROM L3 forwarding.**  Rewrite at L3 with a fresh L2
+   start.  This is the correct behaviour when the destination is
+   **adjacent** to the transit node — there is no next hop to add.
+2. **Symmetric digi-chain rewriting** — what the real routers do for
+   the multi-hop case.  See §5.2.
+3. **NetROM L3 forwarding.**  Rewrite at L3 with a fresh L2
    SABM/UA on each hop.  The L3 envelope preserves the originator
-   identity (§5); each hop's L2 session is independent.
+   identity (§5); each hop's L2 session is independent.  Observed
+   between (X)Net nodes for *routing* traffic, but **not** used for
+   user sessions crossing a PC/Flexnet transit node.
 
 linbpq-flexnet's v1.9.4 attempt at distance-vector
 re-advertisement plus L2 digi-chain extension hit this exact wall
-and was reverted in v1.9.7.
+and was reverted in v1.9.7 — because it extended the chain without
+contracting it on the way back, which is only half the mechanism.
+
+### 5.2 Symmetric digi-chain rewriting — the multi-hop mechanism
+
+Captured on IW2OHX-12 itself (it holds one UDP port per FlexNet peer
+link, so a single capture holds both its input and its output) while a
+user on IW2OHX-4 connected to IGATE, two hops beyond it:
+
+```
+in   IW7EAS-2->IGATE   IW2OHX-4* IW2OHX-12                SABM
+out  IW7EAS-2->IGATE   IW2OHX-4* IW2OHX-12* IW2OHX-14     SABM
+in   IGATE->IW7EAS-2   IW2OHX-14* IW2OHX-12 IW2OHX-4      UA
+out  IGATE->IW7EAS-2   IW2OHX-12* IW2OHX-4                UA
+```
+
+- **Forward:** set our own H-bit, then **append the next hop** as a new
+  unrepeated digi.  The chain grows by exactly one entry per transit
+  node.
+- **Reverse:** **remove the entry we appended** — it arrives as the
+  leading, already-repeated digi of the reversed chain — and set our own
+  H-bit.
+- The originator therefore only ever sees the chain it sent, so V2's
+  reversal invariant holds.
+- Applies to **every** frame type: SABM, UA, I, RR, DISC, DM.  `src` and
+  `dst` are never rewritten; identity is preserved by addressing alone
+  (§5), with no encapsulation.
+- The trailing AXUDP CRC is recomputed, so the frame is genuinely
+  rebuilt at each hop rather than tunnelled.
+
+Because a node cannot distinguish "the digi I appended" from "a digi the
+originator supplied" by inspection alone, an implementation needs
+per-session state keyed on `(src, dst, port)` recording which next hop
+it added.  AX.25's 8-digi limit is the only natural bound on path
+length, so it doubles as the hop limit; refusing to append a callsign
+already in the chain is a cheap loop check.
 
 ---
 
