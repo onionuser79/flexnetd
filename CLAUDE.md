@@ -105,5 +105,8 @@ Two deliberate gaps — know them before "fixing" them:
 - `README.md` — the operator manual: install, annotated config, kernel tuning,
   output files, troubleshooting. Start at its table of contents.
 - `PROTOCOL_SPEC.md` — CE/CF wire formats. The citation target for rule 2.
-- `ROADMAP.md` — gap analysis and item status.
+- `ROADMAP.md` — what is still open (absorbing the 2026-09 wire findings,
+  the dormant PC/Flexnet port, the leaf-vs-transit decision) plus the shipped
+  ledger and the discarded designs. `RELEASE_HISTORY.md` — the milestone
+  narratives it used to carry, history only.
 - `patches/README.md` — why the URONode patch exists and how to apply it.

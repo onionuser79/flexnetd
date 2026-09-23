@@ -625,13 +625,15 @@ watch -n 5 'fl; echo; fld | head -20'
 | `flexdest.c`     | `flexdest` standalone destination-query tool |
 | `flexnetd.h`     | shared types, constants, and declarations |
 | `PROTOCOL_SPEC.md` | on-wire protocol specification |
-| `ROADMAP.md`     | release history |
+| `ROADMAP.md`     | open work, shipped ledger, discarded designs |
+| `RELEASE_HISTORY.md` | archive: the full milestone narratives |
 
 ---
 
 ## 14. Changelog
 
-See [`ROADMAP.md`](ROADMAP.md) for the full release history.  Recent
+See [`RELEASE_HISTORY.md`](RELEASE_HISTORY.md) for the full milestone
+narratives, and [`ROADMAP.md`](ROADMAP.md) for what is still open.  Recent
 highlights:
 
 ### v1.0.0 — Production release (2026-04-21)
@@ -691,7 +693,7 @@ different link-time cadences within one daemon instance.
 
 ### Earlier versions
 
-See [`ROADMAP.md`](ROADMAP.md) for v0.3.0 through v0.7.2.
+See [`RELEASE_HISTORY.md`](RELEASE_HISTORY.md) for v0.3.0 through v0.7.2.
 
 ---
 
