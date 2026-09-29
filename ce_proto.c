@@ -59,7 +59,7 @@ int ce_build_link_setup(uint8_t *buf, int buflen, int min_ssid, int max_ssid)
 
 /* ── CE keepalive: '2' + 240 spaces = 241 bytes ──────────────────────── */
 /*
- * Wire format (see PROTOCOL_SPEC.md §2.5):
+ * Wire format (see PROTOCOL_SPEC.md §5.5):
  *   0x32 + 240 × 0x20  — pure '2' + spaces, NO trailer.
  *
  * (X)Net emits 241 bytes ('2' + 240 spaces); PCFlexnet emits 201 bytes
@@ -155,7 +155,7 @@ int ce_build_link_time(uint8_t *buf, int buflen, long link_time_ms)
 
 /* ── CE type-4 — routing-table sequence gossip ────────────────────── */
 /*
- * Wire format (see PROTOCOL_SPEC.md §2.7):
+ * Wire format (see PROTOCOL_SPEC.md §5.7):
  *   sprintf(buf, "4%u\r", seq);
  *
  * Purpose: cheap "routing table has changed" notification.  A node
@@ -380,7 +380,7 @@ int ce_parse_frame(const uint8_t *data, int len,
     }
 
     /* ── Link time: '1' + decimal + '\r' ──────────────────────────── */
-    /* Format: '1%ld\r' (see PROTOCOL_SPEC.md §2.4).  Wire value is in
+    /* Format: '1%ld\r' (see PROTOCOL_SPEC.md §5.4).  Wire value is in
      * SECONDS (the sender's internal 10-ms tick count divided by 100).
      * Short frames like "10\r", "11\r", "12\r" and long ones like
      * "1600\r" are all the same kind — just different decimal values. */

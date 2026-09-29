@@ -392,7 +392,7 @@ static int run_native_ce_session(int fd)
      * LinkTimeReplyInterval.  Use a small value (e.g. 20) on xnet ports
      * so peer's smoothed RTT measurement converges, and keep the
      * global default (320) on PCFlexnet ports where a short interval
-     * would saturate pcf's RTT field at 4095.  See PROTOCOL_SPEC.md §2.4
+     * would saturate pcf's RTT field at 4095.  See PROTOCOL_SPEC.md §6.3.1
      * and the linbpq-flexnet reference implementation which uses 0
      * (reply on every keepalive) as the xnet-friendly pattern. */
     int     effective_lt_reply;
@@ -730,7 +730,7 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Keepalive: '2' + N spaces (PROTOCOL_SPEC.md §2.5).
+        /* Keepalive: '2' + N spaces (PROTOCOL_SPEC.md §5.5).
          * (X)Net uses N=240 (241 bytes total), PCFlexnet uses N=200
          * (201 bytes total) — both all-spaces, no trailer.  Accept any
          * length ≥ 2 whose body after the '2' is pure space. */
@@ -839,7 +839,7 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Link time: '1' prefix + decimal + '\r' (PROTOCOL_SPEC.md §2.4).
+        /* Link time: '1' prefix + decimal + '\r' (PROTOCOL_SPEC.md §5.4).
          * Accept any length ≥ 3 — "10\r"/"11\r"/"12\r" are valid
          * type-1 frames with decimal values 0/1/2. */
         if (buf[0] == '1' && len >= 3) {
@@ -926,7 +926,7 @@ static int run_native_ce_session(int fd)
             continue;
         }
 
-        /* Type-4 routing-seq gossip: '4' + decimal + '\r' (PROTOCOL_SPEC.md §2.7).
+        /* Type-4 routing-seq gossip: '4' + decimal + '\r' (PROTOCOL_SPEC.md §5.7).
          *
          * Per spec, the RX handler parses the decimal value and stores
          * it as the peer's current sequence.  No reply, no echo.

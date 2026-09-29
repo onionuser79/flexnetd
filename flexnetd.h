@@ -39,7 +39,7 @@
 #define CE_KEEPALIVE_LEN        241
 #define DEFAULT_POLL_INTERVAL   240
 /*
- * DEFAULT_KEEPALIVE_S — per PROTOCOL_SPEC.md §6, the keepalive period
+ * DEFAULT_KEEPALIVE_S — per PROTOCOL_SPEC.md §6.2, the keepalive period
  * is 180 seconds.  Earlier flexnetd versions used 90 s (pre-spec
  * guess) which meant we emitted 2× faster than the reference —
  * harmless but wasteful on RF.  v0.7.2: align with the spec exactly.
