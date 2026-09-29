@@ -100,13 +100,31 @@ Two deliberate gaps — know them before "fixing" them:
   licence and is not part of this project, so changes there are not versioned
   here.
 
-## Deeper docs — read on demand, not by default
+## Live deployment (station facts — deliberately NOT in the public docs)
 
-- `README.md` — the operator manual: install, annotated config, kernel tuning,
-  output files, troubleshooting. Start at its table of contents.
-- `PROTOCOL_SPEC.md` — CE/CF wire formats. The citation target for rule 2.
-- `ROADMAP.md` — what is still open (absorbing the 2026-09 wire findings,
-  the dormant PC/Flexnet port, the leaf-vs-transit decision) plus the shipped
-  ledger and the discarded designs. `RELEASE_HISTORY.md` — the milestone
-  narratives it used to carry, history only.
+As of 2026-09-23: runs on iw2ohx-gw as **IW2OHX-3**, **started by hand**
+(`flexnetd.service` installed but disabled, like `ax25.service` there). One
+port: `Port xnet IW2OHX-14 IW2OHX-3 route_advert=0 lt_reply=0
+advert_mode=full`. The PC/Flexnet port (`IW2OHX-12`) is **not configured**
+and has not run since 2026-04-21 — so ROADMAP's "PC/Flexnet link cost" item
+needs it re-armed to be tested. ⚠ The repo's `flexnetd.conf` is now a
+**generic template** (`NODEA-3`/`NODEB-14`) since 2026-09-29 — never copy it
+over the live `/usr/local/etc/ax25/flexnetd.conf` (`make install` won't).
+⚠ `config.c` still defaults `flex_listen_call` to `IW2OHX-9` (legacy
+single-port path only).
+
+## Documentation set (product docs — keep them product docs)
+
+Marco's rule, 2026-09-29: public docs are **product documentation, not a
+diary** — no station callsigns or test narratives; examples use fictional
+calls (`NODEA-3`, `NODEB-14`, `NODEC-12`, `USER-15`, `DEST`).
+
+- `README.md` — install + parameter reference + running/troubleshooting.
+- `RELEASE_NOTES.md` — per release: change, upgrade notes. Replaces the old
+  `RELEASE_HISTORY.md` (git history). `ax25d.conf` / `ax25d.conf.patch`
+  (station configs) were removed the same day.
+- `ROADMAP.md` — short: v1.1, candidates, out of scope.
+- `PROTOCOL_SPEC.md` — RFC-style spec, **byte-identical with
+  linbpq-flexnet's**: edit one, `cp` to the other, `cmp`, commit both.
+- `CONTRIBUTING.md` — build targets, rules, release steps.
 - `patches/README.md` — why the URONode patch exists and how to apply it.

@@ -1,52 +1,32 @@
-# /usr/local/etc/ax25/flexnetd.conf.debug
-# flexnetd v1.0 — DEBUG configuration
+# flexnetd.conf.debug — debugging template for flexnetd v1.0
 #
-# Usage:
-#   sudo /usr/local/sbin/flexnetd_debug -f -vvv \
-#       -l /tmp/flexnetd_debug.log \
-#       -c /usr/local/etc/ax25/flexnetd.conf.debug
+#   make debug
+#   sudo ./flexnetd_debug -f -vvv -l /tmp/flexnetd_debug.log -c flexnetd.conf.debug
 #
-# This enables:
-#   - Foreground mode (-f) so you can Ctrl-C
-#   - DEBUG log level (-vvv) with hex dumps of every CE/CF frame
-#   - Dual console + file logging (-l)
-#   - Fast probe interval (10 s) for quick test/feedback loops
-#
-# Monitor:
-#   tail -F /tmp/flexnetd_debug.log
-#   watch -n1 'cat /usr/local/var/lib/ax25/flex/paths'
-#   flexdest -r ir5s
+# Debug logging (hex dump of every CE/CF frame), no syslog, and a 10 s
+# path-query interval. Set the identity and Port lines to match your
+# production flexnetd.conf.
 
-# ── Identity ─────────────────────────────────────────────────────────
-MyCall          IW2OHX-3
-Alias           OHXGW
+MyCall          NODEA-3
+Alias           NODEA
 MinSSID         3
 MaxSSID         3
-
 Role            server
 
-# ── FlexNet ports (multi-port syntax, v0.7.0+) ───────────────────────
-# Same peer settings as production flexnetd.conf.
-Port xnet  IW2OHX-14  IW2OHX-3  route_advert=0  lt_reply=0    advert_mode=full
-# Port pcf   IW2OHX-12  IW2OHX-3  route_advert=0  lt_reply=320  advert_mode=record
+Port xnet  NODEB-14  NODEA-3  route_advert=0  lt_reply=0    advert_mode=full
+# Port pcf   NODEC-12  NODEA-3  route_advert=0  lt_reply=320  advert_mode=record
 
-PollInterval       240
-KeepaliveInterval   90
-BeaconInterval     120
+PollInterval          240
+PathProbeInterval      10
+RouteAdvertInterval     0
+LinkTimeReplyInterval 320
 
 GatewaysFile    /usr/local/var/lib/ax25/flex/gateways
 DestFile        /usr/local/var/lib/ax25/flex/destinations
 LinkStatsFile   /usr/local/var/lib/ax25/flex/linkstats
 PathsFile       /usr/local/var/lib/ax25/flex/paths
 
-# DEBUG: fast path-probe cadence (production default is 0).
-PathProbeInterval  10
+Infinity        60000
 
-RouteAdvertInterval    0
-LinkTimeReplyInterval 320
-
-Infinity          60000
-TriggerThreshold     50
-
-LogLevel          4
-Syslog            no
+LogLevel        4
+Syslog          no

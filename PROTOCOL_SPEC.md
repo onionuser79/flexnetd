@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Informational. Describes the protocol as observed on live networks and as implemented by linbpq-flexnet v2.3.0. |
-| **Version** | 1.0 (2026-09-29) |
-| **Applies to** | (X)Net 1.39, PC/Flexnet (V3.3g / V4 family) and linbpq-flexnet v2.3.0. RMNC/Flexnet is expected to follow the same wire format but has not been tested. |
+| **Status** | Informational. Describes the protocol as observed on live networks and as implemented by linbpq-flexnet v2.3.0 and flexnetd v1.0.0. |
+| **Version** | 1.1 (2026-09-29) |
+| **Applies to** | (X)Net 1.39, PC/Flexnet (V3.3g / V4 family), linbpq-flexnet v2.3.0 and flexnetd v1.0.0. RMNC/Flexnet is expected to follow the same wire format but has not been tested. |
 | **Licence** | Same as the repository. Free to use for any independent implementation. |
 
 ---
@@ -312,8 +312,11 @@ correctly and silently loses every multi-record frame a real peer sends.
 5.6.4. A single SSID is a degenerate range (`SSID-LO == SSID-HI`); the
 encoding is the same.
 
-5.6.5. A record with cost `0` has been observed. Its meaning is not
-established (§14). A receiver SHOULD NOT install or re-advertise it.
+5.6.5. A record with cost `0` has been observed: (X)Net re-sends its
+table shortly after session start with every cost `0`, as a refresh
+marker. Its exact meaning is not established (§14). A receiver MUST NOT
+let such a record overwrite a real cost, and SHOULD NOT install or
+re-advertise it.
 
 5.6.6. A `'?'` byte immediately before the COST digits has been reported
 in older material as an "indirect measurement" marker. It is
@@ -325,11 +328,16 @@ distinguishable from SSID 15 by position. Receivers SHOULD tolerate it.
 '4'  DECIMAL  [CHAR]  CR
 ```
 
-Observed from PC/Flexnet. It is described in older material as a
-routing-table sequence number that tells the neighbour its table has
-changed. The exact semantics are not established (§14). linbpq-flexnet
-echoes the frame back unchanged; no interoperability problem has been
-observed with that behaviour.
+Observed from PC/Flexnet; (X)Net's form carries no trailing character
+(`'4' DECIMAL CR`). It is described in older material as a routing-table
+sequence number that tells the neighbour its table has changed. The
+exact semantics are not established (§14).
+
+A node SHOULD NOT send type-4 frames on its own initiative: (X)Net 1.39
+has been observed to withdraw every route learned from a neighbour about
+20 s after receiving an unsolicited type-4 from it. Echoing a type-4
+received from a PC/Flexnet neighbour back to it (linbpq-flexnet's
+behaviour) has caused no observed problem.
 
 ### 5.8 Type 5
 
@@ -397,7 +405,17 @@ neighbour when it receives an init, and its session-start samples are
 large (`600` and more). A spurious init on a healthy link therefore
 inflates our cost for tens of minutes (§5.3.4).
 
-6.3.3. PC/Flexnet's reported cost for a peer is a smoothed average of
+6.3.3. **Your cadence becomes the peer's measurement.** (X)Net
+samples the intervals between a neighbour's CE frames. A neighbour that
+sent a keepalive every 20 s saw (X)Net report its link at about 17 s;
+answering (X)Net's own keepalive and link-time frames as they arrive, and
+sending nothing periodic in between, lets (X)Net report the true link
+time. Conversely, gaps of 300 s or more between type-1 frames to (X)Net
+left its measurement stuck at its initial value. Towards (X)Net: reply to
+its frames promptly, and add no periodic traffic of your own faster than
+its own ~190 s keepalive.
+
+6.3.4. PC/Flexnet's reported cost for a peer is a smoothed average of
 its recent samples, so an outlier decays over several exchanges rather
 than disappearing immediately. A test of a change to link timing MUST
 allow for that.
@@ -529,7 +547,12 @@ implementation that queues the answer behind a rate limiter MUST NOT emit
 `3-` merely because its queue is momentarily empty between refills; it
 SHOULD wait until the answer has actually drained.
 
-8.2.4. Observed request frequency: PC/Flexnet sends `3+` roughly every
+8.2.4. A node MAY open a new link to (X)Net with `3+`, its own records
+and `3-`; (X)Net answers with its table. A node MUST NOT send `3+` to a
+PC/Flexnet peer outside its session start: PC/Flexnet has been observed to
+disconnect the link on an unexpected `3+`.
+
+8.2.5. Observed request frequency: PC/Flexnet sends `3+` roughly every
 75–90 minutes on a stable link. (X)Net rarely sends it (typically only
 around session setup).
 
@@ -801,7 +824,7 @@ routers (§10.3.3).
 | Minimum type-1 interval | 320 s to PC/Flexnet, 20 s to (X)Net | §6.3 |
 | Peer AX.25 retry budget ((X)Net, fast link) | ~0.6 s | §3.3 |
 | PC/Flexnet AXIP session lifetime | ~5445 s | §6.4.2 |
-| PC/Flexnet `3+` interval | ~75–90 min | §8.2.4 |
+| PC/Flexnet `3+` interval | ~75–90 min | §8.2.5 |
 | Record frames tolerated by PC/Flexnet after closing `3-` | 2 | §8.3 |
 | Record-frame pacing | 1/5 s burst 2 (PC/Flexnet), 1/2 s burst 4 ((X)Net) | §8.4 |
 | Maximum digipeaters (= hop limit) | 8 | §10.5 |
@@ -814,7 +837,11 @@ routers (§10.3.3).
 
 - Sends 5-byte init, 241-byte keepalive without `CR`.
 - Accepts pushed record frames at any time; pushes its own changes.
-- Rarely sends `3+`.
+- Rarely sends `3+`; answers one at session start.
+- Withdraws a neighbour's routes after an unsolicited type-4 (§5.7).
+- Measures a neighbour from the intervals between its CE frames
+  (§6.3.3); re-sends its table with cost `0` after session start
+  (§5.6.5).
 - Clamps a peer's advertised SSIDs to the peer's init MAXSSID (§5.3.2).
 - Answers link-time frames very quickly (`"10" CR` within ~1 ms).
 - Carries multi-hop sessions by chain rewriting (§10.3), terminates L2
@@ -844,7 +871,19 @@ routers (§10.3.3).
 - After a peer withdraws a destination, PC/Flexnet may keep advertising
   its copy until its next transaction.
 
-### 13.3 linbpq-flexnet
+### 13.3 flexnetd
+
+- A participant, not a router: advertises its own callsign (with an
+  optional SSID range) and forwards nothing.
+- Per-link settings select the behaviour each peer family needs:
+  link-time frames on every peer event towards (X)Net and at most one
+  per 320 s towards PC/Flexnet; `3+`-framed own records towards (X)Net
+  and bare records towards PC/Flexnet (§8.2.4).
+- Sends no type-4 frames (§5.7).
+- Answers a type-6 whose target is itself; does not forward type-6
+  traversals (§9.1.3).
+
+### 13.4 linbpq-flexnet
 
 - Sends 5-byte init, 241-byte keepalive without `CR`, type-1 value `5`.
 - Identifies itself as `linbpq-1.9` in the L3RTT identity field.
