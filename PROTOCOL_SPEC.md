@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Informational. Describes the protocol as observed on live networks and as implemented by linbpq-flexnet v2.3.0 and flexnetd v1.0.0. |
-| **Version** | 1.1 (2026-09-29) |
+| **Status** | Informational. Describes the protocol as observed on live networks and as implemented by linbpq-flexnet v2.5.0 and flexnetd v1.0.0. |
+| **Version** | 1.2 (2026-10-04) |
 | **Applies to** | (X)Net 1.39, PC/Flexnet (V3.3g / V4 family), linbpq-flexnet v2.3.0 and flexnetd v1.0.0. RMNC/Flexnet is expected to follow the same wire format but has not been tested. |
 | **Licence** | Same as the repository. Free to use for any independent implementation. |
 
@@ -115,8 +115,8 @@ Byte values are written in hexadecimal (`0x33`) or as quoted ASCII
 ## 3. Transport requirements
 
 3.1. A FlexNet link is an AX.25 **connected-mode** session between two
-neighbours. It MAY run over RF, AXIP or AXUDP; all tested deployments
-used AXUDP.
+neighbours. It MAY run over RF, AXIP or AXUDP. Tested deployments used
+AXUDP, and a KISS link between two linbpq-flexnet nodes.
 
 3.2. Implementations MUST use **AX.25 version 2.0** framing on a FlexNet
 link. Captures show (X)Net answering an XID (AX.25 2.2 negotiation) with
@@ -144,6 +144,17 @@ disconnect a link that receives such traffic.
 
 3.6. A node SHOULD treat a FlexNet link as either FlexNet or NET/ROM,
 not both: NET/ROM and FlexNet both use PID `0xCF` (§11).
+
+3.7. **Someone has to open the link.** Every AXUDP link in the captures
+was opened by the (X)Net or PC/Flexnet side. Two neighbours that both
+wait for the other's SABM never form a link — the case for two nodes of
+an implementation that only accepts. An implementation SHOULD be able
+to open the session to a configured neighbour itself and reopen it
+after it drops. On RF it SHOULD back off while the neighbour does not
+answer (linbpq-flexnet: 60 s, doubling to 15 min) so that an absent
+station does not occupy the channel, and both sides opening at once
+MUST be harmless: a SABM received while one's own SABM is outstanding
+is answered with UA and the link is up.
 
 ## 4. Protocol identifiers (PID)
 
@@ -387,6 +398,18 @@ Observed and working cadences:
 PC/Flexnet has been observed to cycle AXIP links whose peer is too quiet;
 the shorter cadence avoids it.
 
+6.2.1. **Echoing keepalives.** flexnetd and linbpq-flexnet answer a
+received keepalive with one of their own; this is the behaviour
+PC/Flexnet's link measurement has been observed to work with. Neither
+(X)Net nor PC/Flexnet was observed to answer such an answer. Two nodes
+that both answer every keepalive, however, answer each other without
+end: the first link between two linbpq-flexnet nodes exchanged 13 093
+keepalives in about three minutes. A node that echoes keepalives MUST
+NOT echo one that is itself an echo; since the two are identical on the
+wire, it SHOULD echo at most once per interval per link
+(linbpq-flexnet: 60 s towards (X)Net-like peers, unrestricted towards
+PC/Flexnet, which keepalives more often and never echoes back).
+
 ### 6.3 Link measurement
 
 Each side measures the link from the **timing** of the peer's CE frames.
@@ -456,7 +479,10 @@ frame ending with `'-'`, withdraws the destination.
 ### 7.2 Route selection
 
 A node keeps, per destination, the cost learned from each neighbour and
-uses the cheapest. On a tie it SHOULD keep the incumbent; (X)Net has
+uses the cheapest **as seen from itself**: the learned cost plus its own
+cost to that neighbour — the same sum it advertises (§7.1.2). Comparing
+learned costs alone makes a destination behind a slow link (RF) look
+as cheap as one behind a fast link (AXUDP). On a tie it SHOULD keep the incumbent; (X)Net has
 been observed to do so, and flapping between equal paths causes needless
 advertisements.
 
@@ -526,6 +552,11 @@ and every connection fails.
   re-advertisement to those.
 - A node that implements L2 forwarding MAY advertise every destination it
   has learned.
+- A node whose L2 forwarding can only leave on the port a frame arrived
+  on — plain digipeating, and linbpq-flexnet's forwarding — MUST NOT
+  advertise to a neighbour on one port what it learned from a neighbour
+  on another. This matters as soon as a node has RF and AXUDP
+  neighbours.
 
 ## 8. Route exchange rules
 
@@ -882,6 +913,10 @@ routers (§10.3.3).
 - Sends no type-4 frames (§5.7).
 - Answers a type-6 whose target is itself; does not forward type-6
   traversals (§9.1.3).
+- Deviation: echoes every keepalive it receives (§6.2.1). Harmless
+  towards (X)Net, PC/Flexnet and linbpq-flexnet v2.5 or later, none of
+  which echoes an echo; two flexnetd nodes linked to each other would
+  echo without end.
 
 ### 13.4 linbpq-flexnet
 
@@ -889,6 +924,10 @@ routers (§10.3.3).
 - Identifies itself as `linbpq-1.9` in the L3RTT identity field.
 - Implements §8.3 towards PC/Flexnet peers (configurable, on by
   default), §10 as an opt-in, and §9.1.3 forwarding as an opt-in.
+- Opens and keeps up links to neighbours declared on KISS ports (§3.7);
+  on AXUDP it waits for the neighbour's SABM.
+- Echoes keepalives at most once per 60 s towards (X)Net-like peers
+  (§6.2.1); advertises within one port only (§7.7).
 - Deviation: by default it classifies a three-byte `"1n" CR` as a status
   frame rather than as a type-1 (§5.4.1); the conforming behaviour is
   enabled with `FLEXNETLT3BYTE YES`.
@@ -932,14 +971,16 @@ filtering on the UDP port is advisable.
 1. AX.25 2.0 connected-mode link per neighbour; no XID (§3.2).
 2. Never stall AX.25 processing for more than a fraction of a second
    (§3.3); be patient with slow peers (§3.4).
-3. No banners or `0xF0` text on a FlexNet link (§3.5).
+3. No banners or `0xF0` text on a FlexNet link (§3.5). Be able to open
+   the link yourself, with back-off on RF (§3.7).
 4. Classify CE frames by content, including those arriving with PID
    `0xF0` (§4, §5.1).
 5. Send one init per session, with MAXSSID covering your advertised SSID
    range (§5.3); accept 5- and 6-byte inits.
 6. Accept three-byte type-1 frames (§5.4.1).
 7. Accept any keepalive `'2' ' ' …`; tell PC/Flexnet from (X)Net by the
-   trailing `CR` (§5.5).
+   trailing `CR` (§5.5). If you echo keepalives, never echo an echo
+   (§6.2.1).
 8. Parse and build record frames as one `'3'` + N records, packed; honour
    the trailing `'-'` (§5.6).
 9. Never prefix your records with `3+` (§5.6).
@@ -949,8 +990,10 @@ filtering on the UDP port is advisable.
 12. Clamp finite costs to 4095; infinity is 60000 (§7.1.3).
 13. Split horizon, withdrawal on neighbour loss, hold-down, loop
     detection (§7.3–§7.5).
-14. Advertise only what you can carry (§7.7) and only callsigns you
-    answer (§7.6).
+14. Choose next hops by learned cost plus your own link cost (§7.2).
+    Advertise only what you can carry — not across ports if your
+    forwarding cannot change port (§7.7) — and only callsigns you answer
+    (§7.6).
 15. Answer `3+` with the whole table and a single, final `3-` (§8.2).
 16. After answering a PC/Flexnet `3+`, send it no records until its next
     `3+` or a new session (§8.3).
