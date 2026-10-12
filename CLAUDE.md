@@ -100,6 +100,14 @@ Two deliberate gaps — know them before "fixing" them:
   licence and is not part of this project, so changes there are not versioned
   here.
 
+## QA
+
+flexnetd (IW2OHX-3) is covered by the station QA harness in the sibling
+repo: `../linbpq-flexnet/qa/PLAYBOOK.md` (checks FD-01 destinations vs
+IW2OHX-14, FD-02 unanswered re-INIT in the journal, LS-01/LS-04 link).
+A flexnetd release is gated by a `standard` campaign via the `flexnet-qa`
+skill.
+
 ## Live deployment (station facts — deliberately NOT in the public docs)
 
 As of 2026-09-23: runs on iw2ohx-gw as **IW2OHX-3**, **started by hand**
