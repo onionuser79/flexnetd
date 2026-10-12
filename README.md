@@ -1,4 +1,4 @@
-# flexnetd v1.0.0
+# flexnetd v1.0.1
 
 A native FlexNet (CE/CF) routing daemon for Linux AX.25. flexnetd peers
 directly with (X)Net and PC/Flexnet nodes over AX.25 (RF, AXIP or AXUDP),

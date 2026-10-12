@@ -5,6 +5,7 @@ protocol details in [PROTOCOL_SPEC.md](PROTOCOL_SPEC.md).
 
 | Version | Date | Highlights |
 |---|---|---|
+| [1.0.1](#v101--2026-10-12) | 2026-10-12 | A neighbour that re-establishes the link gets its init answered |
 | [1.0.0](#v100--2026-04-21) | 2026-04-21 | First production release |
 | [0.7.x](#v07x--2026-04-19--2026-04-21) | 2026-04-19 → 21 | Multiple neighbours, PC/Flexnet interoperability, per-port settings |
 | [0.6.0](#v060--2026-04-19) | 2026-04-19 | Path discovery |
@@ -14,10 +15,12 @@ protocol details in [PROTOCOL_SPEC.md](PROTOCOL_SPEC.md).
 
 ---
 
-## Unreleased
+## v1.0.1 — 2026-10-12
 
-- **A neighbour that re-establishes the link gets its init answered.**
-  When a neighbour re-connected an AX.25 link that the kernel kept (a
+**A neighbour that re-establishes the link gets its init answered.**
+
+- **Routes from a neighbour no longer stop after it re-connects the
+  link.** When a neighbour re-connected an AX.25 link that the kernel kept (a
   fresh SABM on a live connection), it restarted its FlexNet session and
   sent a new init; flexnetd logged it as `no reply — server already sent`
   and did not answer. An (X)Net neighbour then repeated its init every
@@ -27,6 +30,8 @@ protocol details in [PROTOCOL_SPEC.md](PROTOCOL_SPEC.md).
   neighbour's next keepalive, unless it sent an init in the last 60 s.
   The neighbour's first init at session start is still not answered.
   New unit test: `make test_reinit`.
+
+**Upgrade:** drop-in; the configuration is unchanged.
 
 **Wire:** an init (and keepalive) is now also sent in reply to a
 neighbour's init on an established session (PROTOCOL_SPEC §5.3.6).

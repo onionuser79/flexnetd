@@ -1,6 +1,6 @@
 # Roadmap
 
-**Current release: v1.0.0.** What has shipped is in
+**Current release: v1.0.1.** What has shipped is in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 flexnetd does what it set out to do: a stable FlexNet participant that
