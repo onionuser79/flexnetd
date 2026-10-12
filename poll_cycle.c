@@ -339,6 +339,8 @@ static int run_native_ce_session(int fd)
     unsigned route_seq            = 1;
     time_t   last_seq_tx          = 0;
     int     got_peer_init = 0;      /* received peer's init handshake   */
+    /* Server mode: the parent sent our INIT just before forking us. */
+    time_t  last_init_tx  = time(NULL);
     int     sent_routes   = 0;      /* advertised our routes to peer    */
     time_t  last_dest_write = 0;    /* last time we wrote destinations  */
     time_t  last_stats_write = 0;   /* last time we wrote linkstats     */
@@ -718,9 +720,11 @@ static int run_native_ce_session(int fd)
                 int r = ce_send_init_response(fd);
                 if (r < 0)
                     LOG_WRN("run_native_ce_session: init response failed");
-                else
+                else {
+                    last_init_tx = time(NULL);
                     LOG_INF("run_native_ce_session: init response sent "
                             "(byte0=0x30)");
+                }
 
                 send_ce_keepalive(fd);
             } else {
@@ -821,17 +825,41 @@ static int run_native_ce_session(int fd)
          * In socket mode (server) the full CE payload arrives as
          * 30 3E 25 21 0D — first byte is 0x30 ('0'), NOT 0x3E.
          *
-         * Do NOT send an init response here — in server mode the parent
-         * already sent our init via ce_build_link_setup() before forking.
-         * Sending a second init confuses the peer (resets the link state).
-         * Only the pipe-mode handler sends init response (no parent). */
+         * The peer's FIRST init is not answered — in server mode the parent
+         * already sent our init via ce_build_link_setup() before forking,
+         * and a second one at session start confuses the peer (resets the
+         * link state).  A LATER init means the peer restarted its FlexNet
+         * layer under the live L2 link: it waits for ours before sending
+         * keepalives or routes again, so that one is answered (see
+         * ce_reinit_answer). */
         if (buf[0] == '0') {
             int upper_ssid = 0;
             int r = ce_parse_frame(buf, len, NULL, &upper_ssid, NULL);
             if (r == CE_FRAME_INIT) {
-                LOG_INF("run_native_ce_session: init handshake "
-                        "peer_upper_ssid=%d (no reply — server already sent)",
-                        upper_ssid);
+                time_t now = time(NULL);
+                if (ce_reinit_answer(got_peer_init != 0, last_init_tx, now)) {
+                    LOG_INF("run_native_ce_session: peer re-init "
+                            "peer_upper_ssid=%d on established session — "
+                            "answering init + keepalive, re-advertising",
+                            upper_ssid);
+                    if (ce_send_init_response(fd) < 0) {
+                        LOG_WRN("run_native_ce_session: re-init response "
+                                "failed");
+                    } else {
+                        last_init_tx = now;
+                    }
+                    send_ce_keepalive(fd);
+                    g_link_stats.tx_bytes += CE_KEEPALIVE_LEN;
+                    g_link_stats.tx_frames++;
+                    last_keepalive_tx = now;
+                    /* Re-arms the "link stable" advert on the peer's next
+                     * keepalive: its table restarted with it. */
+                    sent_routes = 0;
+                } else {
+                    LOG_INF("run_native_ce_session: init handshake "
+                            "peer_upper_ssid=%d (no reply — server already "
+                            "sent)", upper_ssid);
+                }
                 got_peer_init = 1;
                 got_setup     = 1;  /* enables route advert trigger */
             }

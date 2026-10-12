@@ -9,6 +9,7 @@
 #ifndef FLEXNETD_H
 #define FLEXNETD_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -336,6 +337,31 @@ int ce_build_dest_broadcast(uint8_t *buf, int buflen,
                             const char *via_callsign);
 int ce_parse_frame(const uint8_t *data, int len,
                    char *callsign_out, int *ssid_out, int *rtt_out);
+
+/*
+ * A CE type-0 INIT on a session whose peer INIT we already have means the
+ * peer restarted its FlexNet layer under a live L2 link (it re-SABMed a
+ * connection the kernel kept).  Captures (2026-10-12) show (X)Net then
+ * repeats its INIT every ~190 s and sends no keepalives and no route
+ * records until it receives ours — indefinitely.  The guard stops two
+ * implementations answering each other's answer.
+ *
+ * @param established   peer INIT already seen on this session
+ * @param last_init_tx  when we last sent our INIT (0 = never)
+ * @param now           current wall-clock time
+ * @return true if the INIT must be answered with ours
+ */
+#define CE_REINIT_GUARD_S       60
+
+static inline bool ce_reinit_answer(bool established, time_t last_init_tx,
+                                    time_t now)
+{
+    if (!established)
+        return false;
+    /* now < last_init_tx: wall clock stepped back; answer, never wedge. */
+    return last_init_tx == 0 || now < last_init_tx ||
+           now - last_init_tx >= CE_REINIT_GUARD_S;
+}
 int ce_parse_compact_records(const uint8_t *data, int len,
                              DestEntry *out, int max_entries,
                              int port_idx);
