@@ -31,6 +31,16 @@ test_multi_bind: tools/test_multi_bind.c
 	@echo "Built tools/test_multi_bind — run with: sudo ./tools/test_multi_bind"
 	@ls -lh tools/test_multi_bind
 
+# tools/test_reinit: unit test for ce_reinit_answer() (header-only, no
+# libax25, no root). Build + run with: `make test_reinit`.
+# UBSan only: ASan's allocator cannot map its shadow on the gw Pi's
+# aarch64 address space, and the function under test never allocates.
+test_reinit: tools/test_reinit.c flexnetd.h
+	$(CC) $(CFLAGS_COMMON) -Wpedantic -Wconversion -Werror -g \
+	    -fsanitize=undefined -fno-sanitize-recover=all \
+	    -o tools/test_reinit tools/test_reinit.c
+	./tools/test_reinit
+
 # Debug: symbols, no sanitisers — safe to run with sudo/root on aarch64
 debug: $(SRCS) flexnetd.h
 	$(CC) $(CFLAGS_COMMON) -g3 -O0 -DDEBUG -o $(TARGET)_debug $(SRCS) $(LDFLAGS)
@@ -69,7 +79,7 @@ install: $(TARGET) flexdest
 	else echo "Skipped $(CONFDIR)/flexnetd.conf (exists)"; fi
 
 clean:
-	rm -f $(TARGET) $(TARGET)_debug $(TARGET)_asan flexdest tools/test_multi_bind *.o
+	rm -f $(TARGET) $(TARGET)_debug $(TARGET)_asan flexdest tools/test_multi_bind tools/test_reinit *.o
 	@echo "Cleaned"
 
-.PHONY: all debug asan syntax check-deps install clean test_multi_bind
+.PHONY: all debug asan syntax check-deps install clean test_multi_bind test_reinit

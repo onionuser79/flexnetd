@@ -13,3 +13,5 @@ flexdest
 tools/test_multi_bind
 *.o
 *.d
+tools/test_reinit
+tools/test_reinit.dSYM/

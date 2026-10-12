@@ -214,7 +214,8 @@ Wherever a CE frame carries an SSID as a single byte, the value is
 | end | 1 | `CR` |
 
 5.3.1. Each side sends one init immediately after the AX.25 session comes
-up. It is **not** repeated during the life of the session.
+up. It is **not** repeated during the life of the session, except
+after the peer re-establishes the AX.25 link (§5.3.6).
 
 5.3.2. **MAXSSID bounds what the peer will accept from you.** (X)Net has
 been observed to clamp the upper SSID of every subsequent record from a
@@ -224,14 +225,28 @@ range here, not its own SSID.
 
 5.3.3. A receiver MUST accept both the 5-byte and 6-byte forms.
 
-5.3.4. A node SHOULD NOT send a fresh init on a link that is still
-established. PC/Flexnet treats a received init as the start of a new
+5.3.4. A node SHOULD NOT send an unsolicited fresh init on a link that
+is still established. PC/Flexnet treats a received init as the start of a new
 session and resets its link measurement for that neighbour (§6.3).
 
 5.3.5. Because the peer's init arrives once, an implementation that
 recreates its per-link state mid-session (for example after an internal
 table rebuild) MUST be able to consider the link established from
 ongoing valid CE traffic, not only from having seen the init.
+
+5.3.6. **Re-init on a live link.** A peer that re-establishes the AX.25
+link (a fresh SABM on a link the other side still holds) restarts its
+FlexNet session and sends a new init, while the receiver may never see
+the link go down. A neighbour running (X)Net has been observed, after
+re-establishing the link this way, to repeat its init roughly every
+190 s and to send no keepalives and no route records until it receives
+the receiver's init — for as long as none arrives. A node that receives
+an init on a session it already considers established MUST answer with
+its own init and a keepalive, and SHOULD then re-send its whole table:
+the peer's view of it restarted with the peer. To keep two nodes from
+answering each other's answer, a node SHOULD NOT answer if it sent its
+own init within the last 60 s. Answering is not the unsolicited init
+§5.3.4 advises against: the peer has already started a new session.
 
 ### 5.4 Type 1 — Link time
 
